@@ -12,6 +12,24 @@ import (
 	"time"
 )
 
+const (
+	envAppName        = "APP_NAME"
+	envHTTPAddr       = "HTTP_ADDR"
+	envLogLevel       = "LOG_LEVEL"
+	envLLMBaseURL     = "LLM_BASE_URL"
+	envLLMAPIKey      = "LLM_API_KEY"
+	envLLMModel       = "LLM_MODEL"
+	envLLMTemperature = "LLM_TEMPERATURE"
+	envLLMTimeout     = "LLM_TIMEOUT"
+
+	defaultAppName        = "研发协作 Agent"
+	defaultHTTPAddr       = ":8080"
+	defaultLogLevel       = "info"
+	defaultLLMBaseURL     = "https://api.openai.com/v1"
+	defaultLLMTemperature = 0.2
+	defaultLLMTimeout     = 30 * time.Second
+)
+
 type Config struct {
 	AppName        string
 	HTTPAddr       string
@@ -44,34 +62,34 @@ func LoadFromFile(path string) (Config, error) {
 }
 
 func loadFromEnvironment(fileValues map[string]string) (Config, error) {
-	temperature, err := parseFloat(configValue("LLM_TEMPERATURE", fileValues), 0.2)
+	temperature, err := parseFloat(configValue(envLLMTemperature, fileValues), defaultLLMTemperature)
 	if err != nil {
 		return Config{}, err
 	}
 	if temperature < 0 || temperature > 2 {
-		return Config{}, fmt.Errorf("LLM_TEMPERATURE must be between 0 and 2")
+		return Config{}, fmt.Errorf("%s must be between 0 and 2", envLLMTemperature)
 	}
 
-	timeout, err := parseDuration(configValue("LLM_TIMEOUT", fileValues), 30*time.Second)
+	timeout, err := parseDuration(configValue(envLLMTimeout, fileValues), defaultLLMTimeout)
 	if err != nil {
 		return Config{}, err
 	}
 	if timeout <= 0 {
-		return Config{}, fmt.Errorf("LLM_TIMEOUT must be greater than zero")
+		return Config{}, fmt.Errorf("%s must be greater than zero", envLLMTimeout)
 	}
 
-	baseURL := strings.TrimRight(configValueOrDefault("LLM_BASE_URL", "https://api.openai.com/v1", fileValues), "/")
+	baseURL := strings.TrimRight(configValueOrDefault(envLLMBaseURL, defaultLLMBaseURL, fileValues), "/")
 	if baseURL == "" {
-		return Config{}, fmt.Errorf("LLM_BASE_URL must not be empty")
+		return Config{}, fmt.Errorf("%s must not be empty", envLLMBaseURL)
 	}
 
 	return Config{
-		AppName:        configValueOrDefault("APP_NAME", "研发协作 Agent", fileValues),
-		HTTPAddr:       configValueOrDefault("HTTP_ADDR", ":8080", fileValues),
-		LogLevel:       configValueOrDefault("LOG_LEVEL", "info", fileValues),
+		AppName:        configValueOrDefault(envAppName, defaultAppName, fileValues),
+		HTTPAddr:       configValueOrDefault(envHTTPAddr, defaultHTTPAddr, fileValues),
+		LogLevel:       configValueOrDefault(envLogLevel, defaultLogLevel, fileValues),
 		LLMBaseURL:     baseURL,
-		LLMAPIKey:      strings.TrimSpace(configValue("LLM_API_KEY", fileValues)),
-		LLMModel:       strings.TrimSpace(configValue("LLM_MODEL", fileValues)),
+		LLMAPIKey:      strings.TrimSpace(configValue(envLLMAPIKey, fileValues)),
+		LLMModel:       strings.TrimSpace(configValue(envLLMModel, fileValues)),
 		LLMTemperature: temperature,
 		LLMTimeout:     timeout,
 	}, nil
@@ -79,13 +97,13 @@ func loadFromEnvironment(fileValues map[string]string) (Config, error) {
 
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.LLMAPIKey) == "" {
-		return errors.New("LLM_API_KEY is required")
+		return fmt.Errorf("%s is required", envLLMAPIKey)
 	}
 	if strings.TrimSpace(c.LLMModel) == "" {
-		return errors.New("LLM_MODEL is required")
+		return fmt.Errorf("%s is required", envLLMModel)
 	}
 	if strings.TrimSpace(c.LLMBaseURL) == "" {
-		return errors.New("LLM_BASE_URL is required")
+		return fmt.Errorf("%s is required", envLLMBaseURL)
 	}
 
 	baseURL, err := url.Parse(c.LLMBaseURL)
@@ -93,13 +111,13 @@ func (c Config) Validate() error {
 		return fmt.Errorf("LLM_BASE_URL must be a valid URL")
 	}
 	if c.LLMTemperature < 0 || c.LLMTemperature > 2 {
-		return errors.New("LLM_TEMPERATURE must be between 0 and 2")
+		return fmt.Errorf("%s must be between 0 and 2", envLLMTemperature)
 	}
 	if c.LLMTimeout <= 0 {
-		return errors.New("LLM_TIMEOUT must be greater than zero")
+		return fmt.Errorf("%s must be greater than zero", envLLMTimeout)
 	}
 	if strings.TrimSpace(c.HTTPAddr) == "" {
-		return errors.New("HTTP_ADDR must not be empty")
+		return fmt.Errorf("%s must not be empty", envHTTPAddr)
 	}
 	return nil
 }
@@ -173,7 +191,7 @@ func parseFloat(value string, fallback float64) (float64, error) {
 
 	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
-		return 0, fmt.Errorf("LLM_TEMPERATURE must be a number: %w", err)
+		return 0, fmt.Errorf("%s must be a number: %w", envLLMTemperature, err)
 	}
 	return parsed, nil
 }
@@ -185,7 +203,7 @@ func parseDuration(value string, fallback time.Duration) (time.Duration, error) 
 
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, fmt.Errorf("LLM_TIMEOUT must be a duration: %w", err)
+		return 0, fmt.Errorf("%s must be a duration: %w", envLLMTimeout, err)
 	}
 	return parsed, nil
 }
