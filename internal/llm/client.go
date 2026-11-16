@@ -18,6 +18,7 @@ import (
 const maxResponseBodySize = 4 << 20
 
 var (
+	// 这些错误供上层通过 errors.Is 判断，避免依赖错误字符串。
 	ErrMissingAPIKey = errors.New("llm api key is not configured")
 	ErrMissingModel  = errors.New("llm model is not configured")
 )
@@ -61,6 +62,7 @@ func NewClient(cfg config.Config, logger *slog.Logger) *Client {
 		logger = slog.Default()
 	}
 
+	// 模型请求使用独立 HTTP Client，超时不会影响其他 HTTP 请求。
 	httpClient := &http.Client{}
 	if cfg.LLMTimeout > 0 {
 		httpClient.Timeout = cfg.LLMTimeout
@@ -77,6 +79,7 @@ func NewClient(cfg config.Config, logger *slog.Logger) *Client {
 }
 
 func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, error) {
+	// 先做本地校验，避免无效请求消耗网络和模型额度。
 	if err := ctx.Err(); err != nil {
 		return ChatResponse{}, fmt.Errorf("llm chat canceled before request: %w", err)
 	}
@@ -109,6 +112,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	request.Header.Set("Content-Type", "application/json")
 
 	startedAt := time.Now()
+	// 日志只记录请求元数据，不记录 API Key 和完整消息内容。
 	c.logger.InfoContext(ctx, "llm request",
 		"method", http.MethodPost,
 		"endpoint", endpoint,
@@ -127,6 +131,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	}
 	defer response.Body.Close()
 
+	// 限制响应体大小，避免异常上游返回超大内容占用内存。
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodySize))
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("read llm response: %w", err)
@@ -134,6 +139,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 
 	requestID := response.Header.Get("X-Request-ID")
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		// 将供应商错误统一转换为 APIError，便于 HTTP 层返回一致结构。
 		apiErr := parseAPIError(response.StatusCode, requestID, responseBody)
 		c.logger.ErrorContext(ctx, "llm response error",
 			"status", response.StatusCode,
@@ -201,6 +207,7 @@ func (e *APIError) Error() string {
 }
 
 func parseAPIError(statusCode int, requestID string, body []byte) *APIError {
+	// 即使上游返回非标准错误 JSON，也保留 HTTP 状态码和可用的请求 ID。
 	apiErr := &APIError{
 		StatusCode: statusCode,
 		RequestID:  requestID,

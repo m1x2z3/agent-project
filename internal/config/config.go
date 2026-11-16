@@ -13,6 +13,7 @@ import (
 )
 
 const (
+	// 环境变量名集中管理，避免配置键在不同读取和校验逻辑中拼写不一致。
 	envAppName        = "APP_NAME"
 	envHTTPAddr       = "HTTP_ADDR"
 	envLogLevel       = "LOG_LEVEL"
@@ -46,15 +47,18 @@ func Load() (Config, error) {
 }
 
 func LoadFromFile(path string) (Config, error) {
+	// .env 是本地开发便利项；不存在时继续使用进程环境变量和默认值。
 	fileValues, err := readEnvFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return Config{}, fmt.Errorf("load env file %q: %w", path, err)
 	}
 
+	// 配置优先级：进程环境变量 > .env > 代码默认值。
 	cfg, err := loadFromEnvironment(fileValues)
 	if err != nil {
 		return Config{}, err
 	}
+	// 在启动阶段失败，避免服务启动后才发现 API Key 或模型配置缺失。
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -96,6 +100,7 @@ func loadFromEnvironment(fileValues map[string]string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	// 密钥和模型名没有安全的通用默认值，必须由部署环境显式提供。
 	if strings.TrimSpace(c.LLMAPIKey) == "" {
 		return fmt.Errorf("%s is required", envLLMAPIKey)
 	}
@@ -140,6 +145,7 @@ func readEnvFile(path string) (map[string]string, error) {
 			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
 		}
 
+		// 这里只解析简单的 KEY=VALUE 格式，不修改当前进程的环境变量。
 		key, value, ok := strings.Cut(line, "=")
 		if !ok || strings.TrimSpace(key) == "" {
 			return nil, fmt.Errorf("invalid entry at line %d", lineNumber)
@@ -170,6 +176,7 @@ func parseEnvValue(value string) string {
 }
 
 func configValue(key string, fileValues map[string]string) string {
+	// 显式环境变量优先，便于容器和生产环境覆盖本地 .env。
 	if value, exists := os.LookupEnv(key); exists {
 		return strings.TrimSpace(value)
 	}
