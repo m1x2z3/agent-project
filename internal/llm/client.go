@@ -23,11 +23,13 @@ var (
 	ErrMissingModel  = errors.New("llm model is not configured")
 )
 
+// Message 表示一次模型对话消息。
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
+// ChatResponse 表示 OpenAI 兼容 Chat Completions API 的响应。
 type ChatResponse struct {
 	ID      string   `json:"id"`
 	Model   string   `json:"model"`
@@ -36,18 +38,21 @@ type ChatResponse struct {
 	Created int64    `json:"created"`
 }
 
+// Choice 表示模型返回的一个候选回答。
 type Choice struct {
 	Index        int     `json:"index"`
 	Message      Message `json:"message"`
 	FinishReason string  `json:"finish_reason"`
 }
 
+// Usage 记录本次模型调用消耗的 Token 数量。
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// Client 封装 OpenAI 兼容模型接口的 HTTP 调用、响应解析和错误转换。
 type Client struct {
 	baseURL     string
 	apiKey      string
@@ -57,6 +62,9 @@ type Client struct {
 	logger      *slog.Logger
 }
 
+// NewClient 根据配置创建模型客户端。
+//
+// logger 为 nil 时使用 slog.Default；模型请求超时时间由 cfg.LLMTimeout 控制。
 func NewClient(cfg config.Config, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
@@ -78,6 +86,10 @@ func NewClient(cfg config.Config, logger *slog.Logger) *Client {
 	}
 }
 
+// Chat 向模型发送非流式对话请求，并返回模型生成的第一个完整响应。
+//
+// ctx 控制请求生命周期，messages 不能为空。网络错误、上下文取消、上游非 2xx
+// 响应和无效响应体都会通过 error 返回。
 func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, error) {
 	// 先做本地校验，避免无效请求消耗网络和模型额度。
 	if err := ctx.Err(); err != nil {
@@ -186,6 +198,9 @@ type apiErrorBody struct {
 	Code    any    `json:"code"`
 }
 
+// APIError 表示模型服务返回的非 2xx 错误响应。
+//
+// 它保留 HTTP 状态码、上游请求 ID 和供应商错误字段，供上层统一转换为 HTTP 错误响应。
 type APIError struct {
 	StatusCode int
 	RequestID  string
@@ -195,6 +210,7 @@ type APIError struct {
 	Code       any
 }
 
+// Error 返回包含状态码、请求 ID 和错误消息的可读错误文本。
 func (e *APIError) Error() string {
 	message := e.Message
 	if message == "" {
@@ -206,6 +222,7 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("llm api error: status=%d request_id=%s message=%s", e.StatusCode, e.RequestID, message)
 }
 
+// parseAPIError 将供应商错误 JSON 转换为项目统一的 APIError。
 func parseAPIError(statusCode int, requestID string, body []byte) *APIError {
 	// 即使上游返回非标准错误 JSON，也保留 HTTP 状态码和可用的请求 ID。
 	apiErr := &APIError{

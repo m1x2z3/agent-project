@@ -31,6 +31,9 @@ const (
 	defaultLLMTimeout     = 30 * time.Second
 )
 
+// Config 保存应用和大模型客户端的运行时配置。
+//
+// 配置值来自进程环境变量、.env 文件或代码默认值，敏感配置不会写入代码默认值。
 type Config struct {
 	AppName        string
 	HTTPAddr       string
@@ -42,10 +45,16 @@ type Config struct {
 	LLMTimeout     time.Duration
 }
 
+// Load 从项目根目录的 .env 加载配置，并执行启动前校验。
+//
+// 配置优先级为：进程环境变量 > .env > 代码默认值。
 func Load() (Config, error) {
 	return LoadFromFile(".env")
 }
 
+// LoadFromFile 从指定路径读取 .env 格式的配置，并执行启动前校验。
+//
+// 文件不存在时不会报错，调用方仍可使用进程环境变量和默认值；文件存在但格式错误时会返回错误。
 func LoadFromFile(path string) (Config, error) {
 	// .env 是本地开发便利项；不存在时继续使用进程环境变量和默认值。
 	fileValues, err := readEnvFile(path)
@@ -65,6 +74,7 @@ func LoadFromFile(path string) (Config, error) {
 	return cfg, nil
 }
 
+// loadFromEnvironment 将文件配置、进程环境变量和默认值合并成 Config。
 func loadFromEnvironment(fileValues map[string]string) (Config, error) {
 	temperature, err := parseFloat(configValue(envLLMTemperature, fileValues), defaultLLMTemperature)
 	if err != nil {
@@ -99,6 +109,9 @@ func loadFromEnvironment(fileValues map[string]string) (Config, error) {
 	}, nil
 }
 
+// Validate 检查配置是否满足启动条件。
+//
+// API Key、模型名和合法的模型服务地址是必填项；温度、超时和监听地址也必须满足基本约束。
 func (c Config) Validate() error {
 	// 密钥和模型名没有安全的通用默认值，必须由部署环境显式提供。
 	if strings.TrimSpace(c.LLMAPIKey) == "" {
@@ -127,6 +140,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// readEnvFile 解析简单的 KEY=VALUE 格式，不会修改当前进程环境。
 func readEnvFile(path string) (map[string]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
