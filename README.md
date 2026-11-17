@@ -10,7 +10,7 @@
 
 - 建立可维护的 Go 项目骨架
 - 封装 OpenAI 兼容模型接口
-- 提供非流式和流式聊天 API
+- 提供非流式 HTTP 聊天 API
 - 建立超时、取消、错误响应和单元测试基础
 
 ## 项目结构
@@ -54,7 +54,26 @@ go run ./cmd/server
 
 ```bash
 go test ./...
+go vet ./...
 ```
+
+## HTTP API
+
+健康检查：
+
+```bash
+curl http://localhost:8080/health
+```
+
+聊天接口：
+
+```bash
+curl -X POST http://localhost:8080/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"请只回复：HTTP调用成功"}]}'
+```
+
+`/chat` 当前支持 `system`、`user` 和 `assistant` 三种角色，最多 32 条消息。请求体最大为 1 MiB。模型错误、超时和参数错误都会返回统一的 JSON 错误结构。流式输出接口计划在周六实现。
 
 ## 配置说明
 
