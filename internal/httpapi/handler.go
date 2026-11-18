@@ -158,18 +158,21 @@ func (h *Handler) serveHTTP(w responseObserver, r *http.Request, requestID strin
 	switch r.URL.Path {
 	case "/health":
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", requestID)
 			return
 		}
 		h.handleHealth(w)
 	case "/chat":
 		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
 			h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", requestID)
 			return
 		}
 		h.handleChat(w, r, requestID)
 	case "/chat/stream":
 		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
 			h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", requestID)
 			return
 		}
@@ -270,6 +273,7 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 		eventSequence       = 1
 		upstreamSequence    int
 		hasUpstreamSequence bool
+		hasValidDelta       bool
 		responseID          string
 		responseModel       string
 		usage               *llm.Usage
@@ -284,8 +288,16 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 
 		// 从模型流读取下一个 SSE 数据块。
 		chunk, recvErr := stream.Recv()
+		// 读取可能阻塞；返回时再次检查取消，避免向已断开的客户端写结束或增量事件。
+		if r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(recvErr, io.EOF) {
-			// io.EOF 表示模型发送了 [DONE]，此时发送最终结束事件。
+			// [DONE] 只是协议结束标记，不能将空流或只有 usage 的流当作成功响应。
+			if !hasValidDelta || strings.TrimSpace(responseID) == "" || strings.TrimSpace(responseModel) == "" {
+				h.writeStreamError(w, flusher, "model_error", "stream ended without a valid response", requestID)
+				return
+			}
 			// finish_reason 和 usage 都只使用上游实际提供的值。
 			doneEvent := streamDoneEvent{
 				ID:           responseID,
@@ -357,9 +369,20 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 			if event.Model == "" {
 				event.Model = responseModel
 			}
+			// 首个增量必须有必要元数据；后续 chunk 可以沿用已有 id/model，
+			// 但不能先发送不完整事件，等流结束后才发现契约被破坏。
+			if strings.TrimSpace(event.ID) == "" || strings.TrimSpace(event.Model) == "" {
+				h.writeStreamError(w, flusher, "model_error", "stream response metadata is missing", requestID)
+				return
+			}
 			// 每个增量事件写出后立即 Flush，让客户端实时收到内容。
 			if err := writeSSEEvent(w, flusher, "message.delta", event); err != nil {
 				return
+			}
+			// 空 content 可以是角色声明或正常结束块，不能一律当作异常。
+			if choice.Delta.Role != "" || choice.Delta.Content != "" ||
+				(choice.FinishReason != nil && *choice.FinishReason != "") {
+				hasValidDelta = true
 			}
 		}
 	}
@@ -584,7 +607,8 @@ func (h *Handler) writeChatError(w http.ResponseWriter, err error, requestID str
 	case errors.Is(err, context.DeadlineExceeded):
 		h.writeError(w, http.StatusGatewayTimeout, "model_timeout", "model service timed out", requestID)
 	default:
-		h.logger.Error("chat request failed", "request_id", requestID, "error", err)
+		// 网络错误可能携带含凭据的 URL；记录分类而不是底层错误原文。
+		h.logger.Error("chat request failed", "request_id", requestID, "error_type", errorType(err))
 		h.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error", requestID)
 	}
 }

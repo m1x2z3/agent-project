@@ -38,12 +38,13 @@ func TestHandlerHealth(t *testing.T) {
 func TestHandlerRejectsUnsupportedMethods(t *testing.T) {
 	handler := NewHandler(&fakeChatClient{}, nil)
 	tests := []struct {
-		path   string
-		method string
+		path        string
+		method      string
+		allowMethod string
 	}{
-		{path: "/health", method: http.MethodPost},
-		{path: "/chat", method: http.MethodGet},
-		{path: "/chat/stream", method: http.MethodGet},
+		{path: "/health", method: http.MethodPost, allowMethod: http.MethodGet},
+		{path: "/chat", method: http.MethodGet, allowMethod: http.MethodPost},
+		{path: "/chat/stream", method: http.MethodGet, allowMethod: http.MethodPost},
 	}
 	for _, test := range tests {
 		test := test
@@ -51,6 +52,9 @@ func TestHandlerRejectsUnsupportedMethods(t *testing.T) {
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
 			assertErrorResponse(t, response, http.StatusMethodNotAllowed, "method_not_allowed", "")
+			if got := response.Header().Get("Allow"); got != test.allowMethod {
+				t.Fatalf("Allow = %q, want %q", got, test.allowMethod)
+			}
 		})
 	}
 }
@@ -486,6 +490,56 @@ func TestHandlerChatStreamOmitsUsageWhenUnavailable(t *testing.T) {
 	}
 }
 
+func TestHandlerChatStreamRejectsEmptyOrIncompleteUpstreamResponse(t *testing.T) {
+	tests := []struct {
+		name   string
+		chunks []llm.StreamChunk
+	}{
+		{
+			name: "done without delta",
+		},
+		{
+			name: "delta without metadata",
+			chunks: []llm.StreamChunk{{
+				Choices: []llm.StreamChoice{{
+					Delta: llm.Message{Role: llm.RoleAssistant, Content: "partial"},
+				}},
+			}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(&fakeStreamingClient{
+				stream: &fakeStream{chunks: test.chunks},
+			}, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(
+				http.MethodPost,
+				"/chat/stream",
+				strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+			))
+
+			events := parseSSEEvents(t, response.Body.String())
+			if len(events) == 0 || events[len(events)-1].Name != "error" {
+				t.Fatalf("events = %+v; want final error event", events)
+			}
+			for _, event := range events {
+				if event.Name == "message.done" {
+					t.Fatalf("received success event for incomplete stream: %+v", events)
+				}
+			}
+			var streamErr streamErrorEvent
+			if err := json.Unmarshal(events[len(events)-1].Data, &streamErr); err != nil {
+				t.Fatalf("decode stream error: %v", err)
+			}
+			if streamErr.Code != "model_error" {
+				t.Fatalf("error code = %q, want model_error", streamErr.Code)
+			}
+		})
+	}
+}
+
 func TestHandlerChatStreamRejectsInvalidRequests(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -592,8 +646,8 @@ func TestHandlerChatStreamWritesPostHeaderErrorEvent(t *testing.T) {
 func TestHandlerChatStreamRejectsOutOfOrderSequence(t *testing.T) {
 	client := &fakeStreamingClient{
 		stream: &fakeStream{chunks: []llm.StreamChunk{
-			{Sequence: 1, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
-			{Sequence: 3, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "three"}}}},
+			{Sequence: 1, SequenceFromUpstream: true, ID: "chatcmpl-sequence", Model: "test-model", Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
+			{Sequence: 3, SequenceFromUpstream: true, ID: "chatcmpl-sequence", Model: "test-model", Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "three"}}}},
 		}},
 	}
 	response := httptest.NewRecorder()
@@ -620,8 +674,8 @@ func TestHandlerChatStreamRejectsOutOfOrderSequence(t *testing.T) {
 func TestHandlerChatStreamRejectsDuplicateSequence(t *testing.T) {
 	client := &fakeStreamingClient{
 		stream: &fakeStream{chunks: []llm.StreamChunk{
-			{Sequence: 1, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
-			{Sequence: 1, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "duplicate"}}}},
+			{Sequence: 1, SequenceFromUpstream: true, ID: "chatcmpl-sequence", Model: "test-model", Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
+			{Sequence: 1, SequenceFromUpstream: true, ID: "chatcmpl-sequence", Model: "test-model", Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "duplicate"}}}},
 		}},
 	}
 	response := httptest.NewRecorder()

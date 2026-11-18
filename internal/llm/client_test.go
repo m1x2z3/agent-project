@@ -116,6 +116,70 @@ func TestClientChatReturnsAPIError(t *testing.T) {
 	}
 }
 
+func TestClientLogsSanitizedEndpointAndErrorType(t *testing.T) {
+	var logs bytes.Buffer
+	client := NewClient(config.Config{
+		LLMBaseURL: "https://user:password@example.test/v1?access_token=secret-token",
+		LLMAPIKey:  "test-key",
+		LLMModel:   "test-model",
+	}, slog.New(slog.NewTextHandler(&logs, nil)))
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial failed for " + r.URL.String())
+		}),
+	}
+
+	_, err := client.Chat(context.Background(), []Message{{Role: RoleUser, Content: "hi"}})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want transport error")
+	}
+	logLine := logs.String()
+	if strings.Contains(logLine, "password") ||
+		strings.Contains(logLine, "access_token") ||
+		strings.Contains(logLine, "secret-token") ||
+		strings.Contains(logLine, "dial failed") {
+		t.Fatalf("log contains sensitive endpoint or raw network error: %q", logLine)
+	}
+	if !strings.Contains(logLine, "endpoint=https://example.test/v1") {
+		t.Fatalf("log does not contain sanitized endpoint: %q", logLine)
+	}
+	if !strings.Contains(logLine, "error_type=network_error") {
+		t.Fatalf("log does not contain network error type: %q", logLine)
+	}
+}
+
+func TestClientStreamLogsSanitizedEndpointAndErrorType(t *testing.T) {
+	var logs bytes.Buffer
+	client := NewClient(config.Config{
+		LLMBaseURL: "https://user:password@example.test/v1?access_token=secret-token",
+		LLMAPIKey:  "test-key",
+		LLMModel:   "test-model",
+	}, slog.New(slog.NewTextHandler(&logs, nil)))
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial failed for " + r.URL.String())
+		}),
+	}
+
+	_, err := client.ChatStream(context.Background(), []Message{{Role: RoleUser, Content: "hi"}})
+	if err == nil {
+		t.Fatal("ChatStream() error = nil, want transport error")
+	}
+	logLine := logs.String()
+	if strings.Contains(logLine, "password") ||
+		strings.Contains(logLine, "access_token") ||
+		strings.Contains(logLine, "secret-token") ||
+		strings.Contains(logLine, "dial failed") {
+		t.Fatalf("log contains sensitive endpoint or raw network error: %q", logLine)
+	}
+	if !strings.Contains(logLine, "endpoint=https://example.test/v1") {
+		t.Fatalf("log does not contain sanitized endpoint: %q", logLine)
+	}
+	if !strings.Contains(logLine, "error_type=network_error") {
+		t.Fatalf("log does not contain network error type: %q", logLine)
+	}
+}
+
 func TestClientChatRejectsMissingConfiguration(t *testing.T) {
 	client := NewClient(config.Config{LLMBaseURL: "http://localhost"}, nil)
 

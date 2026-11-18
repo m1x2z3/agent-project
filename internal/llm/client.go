@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -170,7 +171,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	// 日志只记录请求元数据，不记录 API Key 和完整消息内容。
 	c.logger.InfoContext(ctx, "llm request",
 		"method", http.MethodPost,
-		"endpoint", endpoint,
+		"endpoint", sanitizeEndpoint(request.URL),
 		"model", c.model,
 		"message_count", len(messages),
 	)
@@ -180,7 +181,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 		c.logger.ErrorContext(ctx, "llm request failed",
 			"model", c.model,
 			"duration_ms", durationMilliseconds(time.Since(startedAt)),
-			"error", err,
+			"error_type", requestErrorType(err),
 		)
 		return ChatResponse{}, fmt.Errorf("send llm request: %w", err)
 	}
@@ -273,7 +274,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 	startedAt := time.Now()
 	c.logger.InfoContext(ctx, "llm stream request",
 		"method", http.MethodPost,
-		"endpoint", endpoint,
+		"endpoint", sanitizeEndpoint(request.URL),
 		"model", c.model,
 		"message_count", len(messages),
 	)
@@ -283,7 +284,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 		c.logger.ErrorContext(ctx, "llm stream request failed",
 			"model", c.model,
 			"duration_ms", durationMilliseconds(time.Since(startedAt)),
-			"error", err,
+			"error_type", requestErrorType(err),
 		)
 		return nil, fmt.Errorf("send llm stream request: %w", err)
 	}
@@ -323,6 +324,28 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 
 func durationMilliseconds(duration time.Duration) float64 {
 	return float64(duration) / float64(time.Millisecond)
+}
+
+// sanitizeEndpoint 用白名单字段构建日志端点，避免 userinfo、query 和 fragment 泄露凭据。
+func sanitizeEndpoint(endpoint *url.URL) string {
+	return (&url.URL{
+		Scheme:  endpoint.Scheme,
+		Host:    endpoint.Host,
+		Path:    endpoint.Path,
+		RawPath: endpoint.RawPath,
+	}).String()
+}
+
+// requestErrorType 保留排障需要的错误分类，不记录可能携带敏感 URL 的错误原文。
+func requestErrorType(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	default:
+		return "network_error"
+	}
 }
 
 func readResponseBody(reader io.Reader, maxSize int64) ([]byte, error) {
