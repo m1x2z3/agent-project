@@ -175,7 +175,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	if err != nil {
 		c.logger.ErrorContext(ctx, "llm request failed",
 			"model", c.model,
-			"duration", time.Since(startedAt).String(),
+			"duration_ms", durationMilliseconds(time.Since(startedAt)),
 			"error", err,
 		)
 		return ChatResponse{}, fmt.Errorf("send llm request: %w", err)
@@ -195,7 +195,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 		c.logger.ErrorContext(ctx, "llm response error",
 			"status", response.StatusCode,
 			"request_id", requestID,
-			"duration", time.Since(startedAt).String(),
+			"duration_ms", durationMilliseconds(time.Since(startedAt)),
 			"error", apiErr,
 		)
 		return ChatResponse{}, apiErr
@@ -212,7 +212,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	c.logger.InfoContext(ctx, "llm response",
 		"status", response.StatusCode,
 		"request_id", requestID,
-		"duration", time.Since(startedAt).String(),
+		"duration_ms", durationMilliseconds(time.Since(startedAt)),
 		"model", result.Model,
 		"choice_count", len(result.Choices),
 		"total_tokens", result.Usage.TotalTokens,
@@ -270,7 +270,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 	if err != nil {
 		c.logger.ErrorContext(ctx, "llm stream request failed",
 			"model", c.model,
-			"duration", time.Since(startedAt).String(),
+			"duration_ms", durationMilliseconds(time.Since(startedAt)),
 			"error", err,
 		)
 		return nil, fmt.Errorf("send llm stream request: %w", err)
@@ -287,7 +287,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 		c.logger.ErrorContext(ctx, "llm stream response error",
 			"status", response.StatusCode,
 			"request_id", requestID,
-			"duration", time.Since(startedAt).String(),
+			"duration_ms", durationMilliseconds(time.Since(startedAt)),
 			"error", apiErr,
 		)
 		return nil, apiErr
@@ -300,6 +300,10 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 		model:     c.model,
 		requestID: requestID,
 	}, nil
+}
+
+func durationMilliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
 }
 
 type chatRequest struct {

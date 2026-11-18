@@ -73,6 +73,14 @@ go test ./internal/llm -run=^$ -fuzz=FuzzSSEEventParser -fuzztime=10s
 
 GitHub Actions 会自动执行格式检查、单元测试、`go vet` 和 race 测试。
 
+HTTP 服务会通过结构化日志记录请求 ID、接口状态、请求解析耗时、模型调用耗时、
+流式首 Token 延迟和完整响应耗时。通用 HTTP 完成日志由响应包装器统一记录；
+请求解析由解析边界记录；模型和流式指标由客户端 Decorator 记录。业务 Handler
+不维护计时器或观测状态。日志只记录调用元数据，不记录 API Key、完整 Prompt 或
+完整模型回答。
+阶段性性能和真实调用证据保存在
+`docs/evidence/2026-11-18/`。
+
 ## HTTP API
 
 健康检查：

@@ -34,6 +34,25 @@ func TestHandlerHealth(t *testing.T) {
 	}
 }
 
+func TestHandlerHealthLogsTotalDuration(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	handler := NewHandler(&fakeChatClient{}, logger)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	logLine := logs.String()
+	assertLogFields(t, logLine,
+		"msg=\"http request completed\"",
+		"request_id=req-",
+		"method=GET",
+		"path=/health",
+		"status=200",
+		"duration_ms=",
+		"total_duration_ms=",
+	)
+}
+
 func TestHandlerChatSuccess(t *testing.T) {
 	client := fakeChatClient{
 		response: llm.ChatResponse{
@@ -67,6 +86,45 @@ func TestHandlerChatSuccess(t *testing.T) {
 	}
 	if len(client.messages) != 1 || client.messages[0].Content != "你好" {
 		t.Fatalf("unexpected client messages: %+v", client.messages)
+	}
+}
+
+func TestHandlerChatLogsDurationsAndRedactsContent(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	client := &fakeChatClient{
+		response: llm.ChatResponse{
+			ID:    "chatcmpl-1",
+			Model: "test-model",
+			Choices: []llm.Choice{{
+				Message:      llm.Message{Role: llm.RoleAssistant, Content: "secret answer"},
+				FinishReason: "stop",
+			}},
+			Usage: llm.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+		},
+	}
+	handler := NewHandler(client, logger)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
+		http.MethodPost,
+		"/chat",
+		strings.NewReader(`{"messages":[{"role":"user","content":"secret prompt"}]}`),
+	))
+
+	logLine := logs.String()
+	assertLogFields(t, logLine,
+		"msg=\"http request parsed\"",
+		"parse_duration_ms=",
+		"msg=\"model call observed\"",
+		"model_duration_ms=",
+		"msg=\"http request completed\"",
+		"method=POST",
+		"path=/chat",
+		"status=200",
+		"total_duration_ms=",
+	)
+	if strings.Contains(logLine, "secret prompt") || strings.Contains(logLine, "secret answer") || strings.Contains(logLine, "test-key") {
+		t.Fatalf("log contains sensitive content: %q", logLine)
 	}
 }
 
@@ -257,6 +315,87 @@ func TestHandlerChatStreamSuccess(t *testing.T) {
 	}
 	if len(client.messages) != 1 || client.messages[0].Content != "你好" {
 		t.Fatalf("messages = %+v", client.messages)
+	}
+}
+
+func TestHandlerChatStreamLogsFirstTokenAndTotalDuration(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	finishReason := "stop"
+	client := &fakeStreamingClient{
+		stream: &fakeStream{
+			chunks: []llm.StreamChunk{
+				{
+					Sequence: 1,
+					ID:       "chatcmpl-stream",
+					Model:    "test-model",
+					Choices: []llm.StreamChoice{{
+						Index: 0,
+						Delta: llm.Message{Role: llm.RoleAssistant, Content: "private answer"},
+					}},
+				},
+				{
+					Sequence: 2,
+					ID:       "chatcmpl-stream",
+					Model:    "test-model",
+					Choices: []llm.StreamChoice{{
+						Index:        0,
+						Delta:        llm.Message{Content: " done"},
+						FinishReason: &finishReason,
+					}},
+				},
+			},
+		},
+	}
+	handler := NewHandler(client, logger)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"private prompt"}]}`),
+	))
+
+	logLine := logs.String()
+	assertLogFields(t, logLine,
+		"msg=\"http request completed\"",
+		"method=POST",
+		"path=/chat/stream",
+		"status=200",
+		"total_duration_ms=",
+	)
+	assertLogFields(t, logLine,
+		"msg=\"model stream observed\"",
+		"path=/chat/stream",
+		"first_token_duration_ms=",
+		"finish_reason=stop",
+	)
+	if strings.Contains(logLine, "private prompt") || strings.Contains(logLine, "private answer") {
+		t.Fatalf("log contains sensitive content: %q", logLine)
+	}
+}
+
+func TestHandlerChatStreamLogsErrorWithoutSuccessFields(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	handler := NewHandler(&fakeStreamingClient{
+		streamErr: context.DeadlineExceeded,
+	}, logger)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"timeout test"}]}`),
+	))
+
+	logLine := logs.String()
+	assertLogFields(t, logLine,
+		"msg=\"model stream observed\"",
+		"path=/chat/stream",
+		"model_duration_ms=",
+		"error_type=timeout",
+	)
+	if strings.Contains(logLine, "finish_reason=") || strings.Contains(logLine, "first_token_duration_ms=") {
+		t.Fatalf("error log contains success-only fields: %q", logLine)
 	}
 }
 
@@ -539,6 +678,15 @@ func assertErrorResponse(t *testing.T, response *httptest.ResponseRecorder, stat
 	}
 	if body.RequestID == "" {
 		t.Fatal("request_id is empty")
+	}
+}
+
+func assertLogFields(t *testing.T, logLine string, fields ...string) {
+	t.Helper()
+	for _, field := range fields {
+		if !strings.Contains(logLine, field) {
+			t.Errorf("log = %q, missing field %q", logLine, field)
+		}
 	}
 }
 

@@ -41,8 +41,68 @@ type StreamingChatClient interface {
 // Handler 提供健康检查、非流式聊天和 SSE 流式聊天接口。
 type Handler struct {
 	client       ChatClient
+	streaming    StreamingChatClient
 	logger       *slog.Logger
 	maxBodyBytes int64
+}
+
+type requestMetadata struct {
+	requestID string
+	method    string
+	path      string
+	startedAt time.Time
+}
+
+type requestMetadataKey struct{}
+
+type responseObserver interface {
+	http.ResponseWriter
+	Status() int
+}
+
+type observedResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+type flushingObservedResponseWriter struct {
+	*observedResponseWriter
+}
+
+func newObservedResponseWriter(w http.ResponseWriter) responseObserver {
+	observed := &observedResponseWriter{ResponseWriter: w}
+	if _, ok := w.(http.Flusher); ok {
+		return &flushingObservedResponseWriter{observedResponseWriter: observed}
+	}
+	return observed
+}
+
+func (w *observedResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *observedResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *observedResponseWriter) Status() int {
+	return w.status
+}
+
+func (w *flushingObservedResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.ResponseWriter.(http.Flusher).Flush()
 }
 
 // NewHandler 创建 HTTP API Handler。
@@ -50,18 +110,38 @@ func NewHandler(client ChatClient, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{
-		client:       client,
+	handler := &Handler{
+		client:       &observedChatClient{next: client, logger: logger},
 		logger:       logger,
 		maxBodyBytes: maxRequestBodySize,
 	}
+	if streamingClient, ok := client.(StreamingChatClient); ok {
+		handler.streaming = &observedStreamingChatClient{
+			next:   streamingClient,
+			logger: logger,
+		}
+	}
+	return handler
 }
 
 // ServeHTTP 按路径和方法分发请求，并为接口返回统一 JSON 响应。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := newRequestID()
 	w.Header().Set("X-Request-ID", requestID)
+	metadata := requestMetadata{
+		requestID: requestID,
+		method:    r.Method,
+		path:      r.URL.Path,
+		startedAt: time.Now(),
+	}
+	r = r.WithContext(context.WithValue(r.Context(), requestMetadataKey{}, metadata))
+	observedWriter := newObservedResponseWriter(w)
 
+	h.serveHTTP(observedWriter, r, requestID)
+	h.logRequestTiming(observedWriter, metadata)
+}
+
+func (h *Handler) serveHTTP(w responseObserver, r *http.Request, requestID string) {
 	switch r.URL.Path {
 	case "/health":
 		if r.Method != http.MethodGet {
@@ -118,8 +198,7 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 
 	// 流式接口是可选能力：保留 ChatClient 的同时，通过类型断言获取流式能力，
 	// 这样已有只支持非流式 Chat 的测试替身和调用方不需要同步改造。
-	streamingClient, ok := h.client.(StreamingChatClient)
-	if !ok {
+	if h.streaming == nil {
 		h.writeError(w, http.StatusInternalServerError, "internal_error", "streaming model client is unavailable", requestID)
 		return
 	}
@@ -143,7 +222,7 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 
 	// 先建立上游模型流，再写出 SSE Header。
 	// 这样模型连接失败时，客户端仍能收到原有 JSON 错误响应。
-	stream, err := streamingClient.ChatStream(r.Context(), messages)
+	stream, err := h.streaming.ChatStream(r.Context(), messages)
 	if err != nil {
 		if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
 			return
@@ -368,20 +447,73 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request, requestID s
 	h.writeJSON(w, http.StatusOK, response)
 }
 
+func requestMetadataFromContext(ctx context.Context) requestMetadata {
+	metadata, _ := ctx.Value(requestMetadataKey{}).(requestMetadata)
+	return metadata
+}
+
+func (h *Handler) logRequestTiming(w responseObserver, metadata requestMetadata) {
+	duration := durationMilliseconds(time.Since(metadata.startedAt))
+	attrs := []any{
+		"request_id", metadata.requestID,
+		"method", metadata.method,
+		"path", metadata.path,
+		"status", w.Status(),
+		"duration_ms", duration,
+		"total_duration_ms", duration,
+	}
+	h.logger.Info("http request completed", attrs...)
+}
+
+func durationMilliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
+}
+
+func errorType(err error) string {
+	var apiErr *llm.APIError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &apiErr):
+		return "model_error"
+	default:
+		return "internal_error"
+	}
+}
+
 // decodeChatRequest 将 HTTP 请求体解析为聊天请求。
 //
 // 这里同时完成协议层防护：限制请求体大小、拒绝空请求或非法 JSON，
 // 并确保请求体中只有一个完整 JSON 对象，避免拼接额外内容绕过校验。
-func (h *Handler) decodeChatRequest(w http.ResponseWriter, r *http.Request) (chatRequest, error) {
+func (h *Handler) decodeChatRequest(w http.ResponseWriter, r *http.Request) (decoded chatRequest, err error) {
+	parseStartedAt := time.Now()
+	defer func() {
+		metadata := requestMetadataFromContext(r.Context())
+		attrs := []any{
+			"request_id", metadata.requestID,
+			"path", metadata.path,
+			"parse_duration_ms", durationMilliseconds(time.Since(parseStartedAt)),
+		}
+		if err != nil {
+			parseErrorType := "invalid_request"
+			if r.Context().Err() != nil {
+				parseErrorType = errorType(r.Context().Err())
+			}
+			attrs = append(attrs, "error_type", parseErrorType)
+		}
+		h.logger.InfoContext(r.Context(), "http request parsed", attrs...)
+	}()
+
 	// MaxBytesReader 会在读取超过限制时返回错误，避免异常请求占用过多内存。
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
 	// 请求体只使用一次，解析结束后及时关闭底层资源。
 	defer r.Body.Close()
 
-	var request chatRequest
 	decoder := json.NewDecoder(r.Body)
 	// 第一次 Decode 读取并解析主 JSON 对象。
-	if err := decoder.Decode(&request); err != nil {
+	if err := decoder.Decode(&decoded); err != nil {
 		return chatRequest{}, fmt.Errorf("invalid JSON body: %w", err)
 	}
 
@@ -394,7 +526,7 @@ func (h *Handler) decodeChatRequest(w http.ResponseWriter, r *http.Request) (cha
 		}
 		return chatRequest{}, fmt.Errorf("invalid JSON body: %w", err)
 	}
-	return request, nil
+	return decoded, nil
 }
 
 // validateChatRequest 检查消息数量、角色和消息内容，拒绝不满足接口契约的请求。
