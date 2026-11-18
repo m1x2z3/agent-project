@@ -56,7 +56,22 @@ go run ./cmd/server
 ```bash
 go test ./...
 go vet ./...
+go test -race ./...
 ```
+
+API 契约保存在 [`docs/openapi.json`](docs/openapi.json)，包含 `/health`、`/chat`
+和 `/chat/stream` 的请求、响应、统一错误结构及 SSE 事件示例。契约测试会在
+`go test ./...` 中校验文档与当前 Handler 路由和响应结构的一致性。
+
+项目提供三个 Go Fuzz 入口，用于验证请求 JSON、消息校验和 SSE 解析边界：
+
+```bash
+go test ./internal/httpapi -run=^$ -fuzz=FuzzDecodeChatRequest -fuzztime=10s
+go test ./internal/httpapi -run=^$ -fuzz=FuzzValidateChatRequest -fuzztime=10s
+go test ./internal/llm -run=^$ -fuzz=FuzzSSEEventParser -fuzztime=10s
+```
+
+GitHub Actions 会自动执行格式检查、单元测试、`go vet` 和 race 测试。
 
 ## HTTP API
 

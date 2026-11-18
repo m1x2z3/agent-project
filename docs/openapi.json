@@ -1,0 +1,411 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "研发协作 Agent API",
+    "version": "0.1.0",
+    "description": "第一周工程基线的健康检查、非流式聊天和 SSE 流式聊天接口。"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "健康检查",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "服务可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
+    "/chat": {
+      "post": {
+        "summary": "非流式聊天",
+        "operationId": "createChatCompletion",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ChatRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "模型完整响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "$ref": "#/components/responses/ModelError"
+          },
+          "504": {
+            "$ref": "#/components/responses/ModelTimeout"
+          }
+        }
+      }
+    },
+    "/chat/stream": {
+      "post": {
+        "summary": "SSE 流式聊天",
+        "operationId": "createStreamingChatCompletion",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ChatRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Server-Sent Events 流",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestID"
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "delta": {
+                    "summary": "增量事件",
+                    "value": "event: message.delta\ndata: {\"id\":\"chatcmpl-1\",\"model\":\"deepseek-flash\",\"sequence\":1,\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}\n\n"
+                  },
+                  "done": {
+                    "summary": "结束事件",
+                    "value": "event: message.done\ndata: {\"id\":\"chatcmpl-1\",\"model\":\"deepseek-flash\",\"finish_reason\":\"stop\"}\n\n"
+                  },
+                  "error": {
+                    "summary": "流式错误事件",
+                    "value": "event: error\ndata: {\"code\":\"model_error\",\"message\":\"model service returned an error\",\"request_id\":\"req-xxx\"}\n\n"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "$ref": "#/components/responses/ModelError"
+          },
+          "504": {
+            "$ref": "#/components/responses/ModelTimeout"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "headers": {
+      "RequestID": {
+        "description": "用于关联请求、日志和模型调用的请求 ID。",
+        "schema": {
+          "type": "string",
+          "example": "req-0123456789abcdef"
+        }
+      }
+    },
+    "requestBodies": {
+      "ChatRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ChatRequest"
+            },
+            "example": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "你好"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "InvalidRequest": {
+        "description": "请求格式或参数错误",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "服务内部错误",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ModelError": {
+        "description": "模型服务返回错误",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ModelTimeout": {
+        "description": "模型服务超时",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "HTTP 方法不支持",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        }
+      },
+      "ChatRequest": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            }
+          }
+        }
+      },
+      "ChatMessage": {
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user",
+              "assistant"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "ChatResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "model",
+          "message",
+          "usage"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "message": {
+            "$ref": "#/components/schemas/ChatMessage"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "required": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "properties": {
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "StreamDeltaEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "model",
+          "sequence",
+          "index",
+          "delta"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "delta": {
+            "$ref": "#/components/schemas/StreamMessageDelta"
+          }
+        }
+      },
+      "StreamMessageDelta": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "",
+              "system",
+              "user",
+              "assistant"
+            ]
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "StreamDoneEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "model"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "finish_reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          }
+        }
+      },
+      "StreamErrorEvent": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
