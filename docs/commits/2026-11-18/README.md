@@ -53,3 +53,13 @@
 - 忽略 `.gocache/`，保留本地缓存，不删除文件。
 - 补充上述边界场景的回归测试，覆盖 `Allow` Header、空流/不完整流、端点脱敏和网络错误分类。
 - 验证通过：`go test ./...`、`go vet ./...`、`go test -race ./...`。
+
+## 第二周第 1 天：Eino 抽象（待确认，未提交）
+
+- 锁定 Eino `v0.9.23`。
+- 新增 `internal/agent`，完成 Prompt、Demo ChatModel、Lambda、Chain 和 Graph 最小调用链。
+- 增加模型错误、Context 取消、空输入、空模型和 Chain/Graph 输出一致性测试。
+- 增加 Eino 调用链路与边界说明：`docs/notes/Eino调用链路-2026-11-18.md`。
+- 增加离线示例入口：`go run ./cmd/eino-demo`。
+- 未修改现有 `/chat`、`/chat/stream` 和 `internal/llm` 行为。
+- 验证通过：`go test ./...`、`go vet ./...`、`go test -race ./...`。

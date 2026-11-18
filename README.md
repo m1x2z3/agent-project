@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第一周：工程准备与 LLM 最小闭环。
+第二周第 1 天：Eino 最小编排与模型调用边界。
 
 本周目标：
 
@@ -13,6 +13,7 @@
 - 提供非流式 HTTP 聊天 API
 - 提供 SSE 流式 HTTP 聊天 API
 - 建立超时、取消、错误响应和单元测试基础
+- 使用 Eino 验证 Prompt、Model、Lambda、Chain 和 Graph 的最小调用链
 
 ## 项目结构
 
@@ -62,6 +63,16 @@ go test -race ./...
 API 契约保存在 [`docs/openapi.json`](docs/openapi.json)，包含 `/health`、`/chat`
 和 `/chat/stream` 的请求、响应、统一错误结构及 SSE 事件示例。契约测试会在
 `go test ./...` 中校验文档与当前 Handler 路由和响应结构的一致性。
+
+Eino 最小调用链使用确定性模型替身，不访问外部模型服务，可直接运行：
+
+```bash
+go run ./cmd/eino-demo
+```
+
+示例同时执行 `Prompt -> Model -> Lambda` 的 Chain 和
+`START -> Prompt -> Model -> Lambda -> END` 的 Graph。Eino 只存在于
+`internal/agent` 编排边界，HTTP Handler 和 `internal/llm` 不依赖 Eino 类型。
 
 项目提供三个 Go Fuzz 入口，用于验证请求 JSON、消息校验和 SSE 解析边界：
 
