@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,17 +11,31 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-project/internal/config"
 )
 
-const maxResponseBodySize = 4 << 20
+const (
+	maxResponseBodySize = 4 << 20
+	maxStreamEventSize  = 1 << 20
+)
 
 var (
 	// 这些错误供上层通过 errors.Is 判断，避免依赖错误字符串。
 	ErrMissingAPIKey = errors.New("llm api key is not configured")
 	ErrMissingModel  = errors.New("llm model is not configured")
+	ErrInvalidStream = errors.New("invalid llm stream")
+)
+
+const (
+	// RoleSystem 表示系统级指令或上下文。
+	RoleSystem = "system"
+	// RoleUser 表示用户输入。
+	RoleUser = "user"
+	// RoleAssistant 表示模型生成的消息。
+	RoleAssistant = "assistant"
 )
 
 // Message 表示一次模型对话消息。
@@ -50,6 +65,30 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+// ChatStream 表示一个可以逐块读取模型输出的流。
+//
+// Recv 返回 io.EOF 表示上游发送了 [DONE]；调用方仍应在结束后调用 Close。
+type ChatStream interface {
+	Recv() (StreamChunk, error)
+	Close() error
+}
+
+// StreamChunk 表示 OpenAI 兼容流式响应中的一个 SSE 数据块。
+type StreamChunk struct {
+	Sequence int
+	ID       string
+	Model    string
+	Choices  []StreamChoice
+	Usage    *Usage
+}
+
+// StreamChoice 表示流式响应中的一个增量候选。
+type StreamChoice struct {
+	Index        int     `json:"index"`
+	Delta        Message `json:"delta"`
+	FinishReason *string `json:"finish_reason"`
 }
 
 // Client 封装 OpenAI 兼容模型接口的 HTTP 调用、响应解析和错误转换。
@@ -181,10 +220,229 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	return result, nil
 }
 
+// ChatStream 向模型发起流式对话请求，并返回一个按 SSE 数据块读取的流。
+//
+// 请求体和鉴权方式与 Chat 保持一致，只额外设置 stream=true。响应体的所有权
+// 转移给 chatStream，由调用方通过 Close 释放。
+func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("llm stream canceled before request: %w", err)
+	}
+	if c.apiKey == "" {
+		return nil, ErrMissingAPIKey
+	}
+	if c.model == "" {
+		return nil, ErrMissingModel
+	}
+	if len(messages) == 0 {
+		return nil, errors.New("llm stream requires at least one message")
+	}
+
+	requestBody := chatRequest{
+		Model:       c.model,
+		Messages:    messages,
+		Temperature: c.temperature,
+		Stream:      true,
+	}
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal llm stream request: %w", err)
+	}
+
+	endpoint := c.baseURL + "/chat/completions"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create llm stream request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+c.apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "text/event-stream")
+
+	startedAt := time.Now()
+	c.logger.InfoContext(ctx, "llm stream request",
+		"method", http.MethodPost,
+		"endpoint", endpoint,
+		"model", c.model,
+		"message_count", len(messages),
+	)
+
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		c.logger.ErrorContext(ctx, "llm stream request failed",
+			"model", c.model,
+			"duration", time.Since(startedAt).String(),
+			"error", err,
+		)
+		return nil, fmt.Errorf("send llm stream request: %w", err)
+	}
+
+	requestID := response.Header.Get("X-Request-ID")
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		defer response.Body.Close()
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBodySize))
+		if readErr != nil {
+			return nil, fmt.Errorf("read llm stream error response: %w", readErr)
+		}
+		apiErr := parseAPIError(response.StatusCode, requestID, responseBody)
+		c.logger.ErrorContext(ctx, "llm stream response error",
+			"status", response.StatusCode,
+			"request_id", requestID,
+			"duration", time.Since(startedAt).String(),
+			"error", apiErr,
+		)
+		return nil, apiErr
+	}
+
+	return &chatStream{
+		reader:    bufio.NewReader(response.Body),
+		body:      response.Body,
+		logger:    c.logger,
+		model:     c.model,
+		requestID: requestID,
+	}, nil
+}
+
 type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
+	Stream      bool      `json:"stream,omitempty"`
+}
+
+type chatStream struct {
+	reader        *bufio.Reader
+	body          io.ReadCloser
+	logger        *slog.Logger
+	model         string
+	requestID     string
+	sequence      int
+	done          bool
+	eofAfterEvent bool
+	closeOnce     sync.Once
+	closeErr      error
+}
+
+// Recv 读取下一个 SSE 数据块；只有收到 [DONE] 后才返回 io.EOF。
+//
+// 这里的循环不是把一个文本块拆成多次读取，而是为了跳过空事件、
+// 注释事件等没有业务数据的 SSE 事件，直到拿到一个有效 chunk。
+// 具体的逐行读取和多行 data 拼接由 readEvent 完成。
+func (s *chatStream) Recv() (StreamChunk, error) {
+	if s.done {
+		return StreamChunk{}, io.EOF
+	}
+	if s.eofAfterEvent {
+		return StreamChunk{}, fmt.Errorf("%w: data event was not followed by [DONE]", ErrInvalidStream)
+	}
+
+	// 外层循环：不断获取 SSE 事件，跳过空事件，直到返回一个有效 chunk。
+	for {
+		data, err := s.readEvent()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return StreamChunk{}, fmt.Errorf("%w: stream ended before [DONE]", ErrInvalidStream)
+			}
+			return StreamChunk{}, fmt.Errorf("%w: %v", ErrInvalidStream, err)
+		}
+		if data == "" {
+			continue
+		}
+		if data == "[DONE]" {
+			s.done = true
+			return StreamChunk{}, io.EOF
+		}
+		var wire struct {
+			ID      string         `json:"id"`
+			Model   string         `json:"model"`
+			Choices []StreamChoice `json:"choices"`
+			Usage   *Usage         `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(data), &wire); err != nil {
+			return StreamChunk{}, fmt.Errorf("%w: decode data event: %v", ErrInvalidStream, err)
+		}
+		if len(wire.Choices) == 0 && wire.Usage == nil {
+			return StreamChunk{}, fmt.Errorf("%w: data event contains no choices or usage", ErrInvalidStream)
+		}
+
+		s.sequence++
+		return StreamChunk{
+			Sequence: s.sequence,
+			ID:       wire.ID,
+			Model:    wire.Model,
+			Choices:  wire.Choices,
+			Usage:    wire.Usage,
+		}, nil
+	}
+}
+
+// Close 关闭底层响应体；重复调用只会关闭一次。
+func (s *chatStream) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.body.Close()
+	})
+	return s.closeErr
+}
+
+// readEvent 按 SSE 协议逐行读取并拼接一个完整事件。
+//
+// SSE 使用空行表示事件结束，因此一个事件可能包含多行 data:
+// 字段。这里的循环会持续读取这些行，直到遇到空行，再把多行 data
+// 用换行符拼接后返回；它不是在重复读取同一个业务 chunk。
+func (s *chatStream) readEvent() (string, error) {
+	var data strings.Builder
+	hasData := false
+	eventSize := 0
+
+	// 逐行读取当前 SSE 事件，直到遇到空行表示事件结束。
+	for {
+		line, err := s.reader.ReadString('\n')
+		if line != "" {
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+			eventSize += len(line)
+			if eventSize > maxStreamEventSize {
+				return "", fmt.Errorf("%w: event exceeds %d bytes", ErrInvalidStream, maxStreamEventSize)
+			}
+
+			if line == "" {
+				if hasData {
+					// 空行表示当前 SSE 事件结束，交给 Recv 解析 data 内容。
+					return data.String(), nil
+				}
+				continue
+			}
+			if strings.HasPrefix(line, ":") {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(line, "data:"):
+				value := strings.TrimPrefix(line, "data:")
+				value = strings.TrimPrefix(value, " ")
+				if hasData {
+					data.WriteByte('\n')
+				}
+				data.WriteString(value)
+				hasData = true
+			case strings.HasPrefix(line, "event:"), strings.HasPrefix(line, "id:"), strings.HasPrefix(line, "retry:"):
+				// These SSE fields are valid but are not needed by the model protocol.
+			default:
+				return "", fmt.Errorf("%w: unsupported SSE field", ErrInvalidStream)
+			}
+		}
+
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				// 允许最后一个事件没有额外的空行；调用方会继续读取并验证
+				// 它是否确实是 [DONE]，避免把正常结束误判为半包。
+				if hasData {
+					s.eofAfterEvent = true
+					return data.String(), nil
+				}
+				return "", io.ErrUnexpectedEOF
+			}
+			return "", err
+		}
+	}
 }
 
 type apiErrorEnvelope struct {

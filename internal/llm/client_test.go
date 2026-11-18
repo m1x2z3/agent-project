@@ -154,6 +154,246 @@ func TestClientChatHonorsContextCancellation(t *testing.T) {
 	}
 }
 
+func TestClientChatStreamParsesSSE(t *testing.T) {
+	var received chatRequest
+	var acceptHeader string
+	body := strings.Join([]string{
+		`data: {"id":"chatcmpl-stream","model":"test-model","choices":[{"index":0,`,
+		`data: "delta":{"role":"assistant","content":"你"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-stream","model":"test-model","choices":[{"index":0,"delta":{"content":"好"},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"id":"chatcmpl-stream","model":"test-model","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"",
+		`data: [DONE]`,
+	}, "\n")
+
+	client := NewClient(config.Config{
+		LLMBaseURL: "https://example.test/v1",
+		LLMAPIKey:  "test-key",
+		LLMModel:   "test-model",
+	}, nil)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			acceptHeader = r.Header.Get("Accept")
+			if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+				t.Fatalf("decode stream request: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	stream, err := client.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	defer stream.Close()
+
+	if !received.Stream || acceptHeader != "text/event-stream" {
+		t.Fatalf("stream request = %+v, accept = %q", received, acceptHeader)
+	}
+
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("first Recv() error = %v", err)
+	}
+	if first.Sequence != 1 || first.ID != "chatcmpl-stream" || first.Choices[0].Delta.Content != "你" {
+		t.Fatalf("unexpected first chunk: %+v", first)
+	}
+	if first.Choices[0].Delta.Role != "assistant" {
+		t.Fatalf("role = %q, want assistant", first.Choices[0].Delta.Role)
+	}
+
+	second, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("second Recv() error = %v", err)
+	}
+	if second.Sequence != 2 || second.Choices[0].Delta.Content != "好" {
+		t.Fatalf("unexpected second chunk: %+v", second)
+	}
+	if second.Choices[0].FinishReason == nil || *second.Choices[0].FinishReason != "stop" {
+		t.Fatalf("finish reason = %v, want stop", second.Choices[0].FinishReason)
+	}
+
+	third, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("usage Recv() error = %v", err)
+	}
+	if third.Sequence != 3 || third.Usage == nil || third.Usage.TotalTokens != 5 {
+		t.Fatalf("unexpected usage chunk: %+v", third)
+	}
+
+	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
+		t.Fatalf("done Recv() error = %v, want io.EOF", err)
+	}
+	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
+		t.Fatalf("repeated done Recv() error = %v, want io.EOF", err)
+	}
+}
+
+func TestClientChatStreamMapsAPIErrors(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusBadGateway} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			client := NewClient(config.Config{
+				LLMBaseURL: "https://example.test",
+				LLMAPIKey:  "test-key",
+				LLMModel:   "test-model",
+			}, nil)
+			client.httpClient = &http.Client{
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("X-Request-ID", "upstream-request")
+					return &http.Response{
+						StatusCode: statusCode,
+						Header:     header,
+						Body: io.NopCloser(strings.NewReader(
+							`{"error":{"message":"upstream failed","type":"provider_error","code":"provider_failure"}}`,
+						)),
+						Request: r,
+					}, nil
+				}),
+			}
+
+			_, err := client.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error type = %T, want *APIError", err)
+			}
+			if apiErr.StatusCode != statusCode || apiErr.RequestID != "upstream-request" {
+				t.Fatalf("unexpected API error: %+v", apiErr)
+			}
+		})
+	}
+}
+
+func TestClientChatStreamRejectsInvalidSSE(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "invalid json",
+			body: "data: {not-json}\n\n",
+		},
+		{
+			name: "unsupported field",
+			body: "unknown: value\n\n",
+		},
+		{
+			name: "empty chunk",
+			body: "data: {\"id\":\"x\",\"choices\":[]}\n\n",
+		},
+		{
+			name: "event too large",
+			body: "data: " + strings.Repeat("x", maxStreamEventSize),
+		},
+		{
+			name: "unexpected eof",
+			body: "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := NewClient(config.Config{
+				LLMBaseURL: "https://example.test",
+				LLMAPIKey:  "test-key",
+				LLMModel:   "test-model",
+			}, nil)
+			client.httpClient = &http.Client{
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(test.body)),
+						Request:    r,
+					}, nil
+				}),
+			}
+
+			stream, err := client.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+			if err != nil {
+				t.Fatalf("ChatStream() error = %v", err)
+			}
+			defer stream.Close()
+
+			_, err = stream.Recv()
+			if test.name == "unexpected eof" {
+				if err != nil {
+					t.Fatalf("first Recv() error = %v, want nil for complete data event", err)
+				}
+				_, err = stream.Recv()
+			}
+			if !errors.Is(err, ErrInvalidStream) {
+				t.Fatalf("Recv() error = %v, want ErrInvalidStream", err)
+			}
+		})
+	}
+}
+
+func TestClientChatStreamCloseIsIdempotent(t *testing.T) {
+	body := &countingReadCloser{Reader: strings.NewReader("data: [DONE]\n\n")}
+	client := NewClient(config.Config{
+		LLMBaseURL: "https://example.test",
+		LLMAPIKey:  "test-key",
+		LLMModel:   "test-model",
+	}, nil)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       body,
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	stream, err := client.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if body.closeCount != 1 {
+		t.Fatalf("close count = %d, want 1", body.closeCount)
+	}
+}
+
+func TestClientChatStreamHonorsContextCancellation(t *testing.T) {
+	client := NewClient(config.Config{
+		LLMBaseURL: "https://example.test",
+		LLMAPIKey:  "test-key",
+		LLMModel:   "test-model",
+	}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := client.ChatStream(ctx, []Message{{Role: "user", Content: "hi"}})
+	if err == nil || !strings.Contains(err.Error(), "canceled before request") {
+		t.Fatalf("error = %v, want pre-request cancellation error", err)
+	}
+}
+
+type countingReadCloser struct {
+	io.Reader
+	closeCount int
+}
+
+func (r *countingReadCloser) Close() error {
+	r.closeCount++
+	return nil
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

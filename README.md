@@ -11,6 +11,7 @@
 - 建立可维护的 Go 项目骨架
 - 封装 OpenAI 兼容模型接口
 - 提供非流式 HTTP 聊天 API
+- 提供 SSE 流式 HTTP 聊天 API
 - 建立超时、取消、错误响应和单元测试基础
 
 ## 项目结构
@@ -73,7 +74,23 @@ curl -X POST http://localhost:8080/chat \
   -d '{"messages":[{"role":"user","content":"请只回复：HTTP调用成功"}]}'
 ```
 
-`/chat` 当前支持 `system`、`user` 和 `assistant` 三种角色，最多 32 条消息。请求体最大为 1 MiB。模型错误、超时和参数错误都会返回统一的 JSON 错误结构。流式输出接口计划在周六实现。
+`/chat` 当前支持 `system`、`user` 和 `assistant` 三种角色，最多 32 条消息。请求体最大为 1 MiB。模型错误、超时和参数错误都会返回统一的 JSON 错误结构。
+
+流式聊天接口：
+
+```bash
+curl -N -X POST http://localhost:8080/chat/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"请逐字回复：流式调用成功"}]}'
+```
+
+`/chat/stream` 使用 Server-Sent Events（SSE）返回事件：
+
+- `message.delta`：模型生成的增量内容，包含 `id`、`model`、`sequence`、`index` 和 `delta`。
+- `message.done`：流结束事件，包含模型返回的 `finish_reason`；只有上游提供 usage 时才包含 `usage`。
+- `error`：响应 Header 已发送后发生模型或协议错误时返回的错误事件。
+
+客户端断开或请求 Context 取消后，服务会停止读取上游并停止写入响应。流建立前的参数错误、模型超时和上游错误仍返回普通 JSON 错误。`finish_reason` 完全使用模型服务返回的值，HTTP 层不会自行伪造。
 
 ## 配置说明
 

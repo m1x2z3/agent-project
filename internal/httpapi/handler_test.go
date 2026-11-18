@@ -175,6 +175,353 @@ func TestHandlerChatStopsWhenContextCanceled(t *testing.T) {
 	}
 }
 
+func TestHandlerChatStreamSuccess(t *testing.T) {
+	finishReason := "stop"
+	client := &fakeStreamingClient{
+		stream: &fakeStream{chunks: []llm.StreamChunk{
+			{
+				Sequence: 1,
+				ID:       "chatcmpl-stream",
+				Model:    "deepseek-flash",
+				Choices: []llm.StreamChoice{{
+					Index: 0,
+					Delta: llm.Message{Role: "assistant", Content: "你"},
+				}},
+			},
+			{
+				Sequence: 2,
+				ID:       "chatcmpl-stream",
+				Model:    "deepseek-flash",
+				Choices: []llm.StreamChoice{{
+					Index:        0,
+					Delta:        llm.Message{Content: "好"},
+					FinishReason: &finishReason,
+				}},
+			},
+			{
+				Sequence: 3,
+				ID:       "chatcmpl-stream",
+				Model:    "deepseek-flash",
+				Usage:    &llm.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
+			},
+		}},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/chat/stream", strings.NewReader(
+		`{"messages":[{"role":"user","content":"你好"}]}`,
+	))
+	response := httptest.NewRecorder()
+	handler := NewHandler(client, nil)
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content type = %q", got)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("cache control = %q", got)
+	}
+	if got := response.Header().Get("Connection"); got != "keep-alive" {
+		t.Fatalf("connection = %q", got)
+	}
+	if response.Header().Get("X-Request-ID") == "" {
+		t.Fatal("X-Request-ID is empty")
+	}
+
+	events := parseSSEEvents(t, response.Body.String())
+	if len(events) != 3 {
+		t.Fatalf("event count = %d, want 3; body=%s", len(events), response.Body.String())
+	}
+	if events[0].Name != "message.delta" || events[1].Name != "message.delta" || events[2].Name != "message.done" {
+		t.Fatalf("event names = %+v", events)
+	}
+
+	var first streamDeltaEvent
+	if err := json.Unmarshal(events[0].Data, &first); err != nil {
+		t.Fatalf("decode first event: %v", err)
+	}
+	if first.Sequence != 1 || first.Delta.Content != "你" {
+		t.Fatalf("first delta = %+v", first)
+	}
+
+	var done streamDoneEvent
+	if err := json.Unmarshal(events[2].Data, &done); err != nil {
+		t.Fatalf("decode done event: %v", err)
+	}
+	if done.FinishReason == nil || *done.FinishReason != "stop" {
+		t.Fatalf("finish reason = %v", done.FinishReason)
+	}
+	if done.Usage == nil || done.Usage.TotalTokens != 12 {
+		t.Fatalf("usage = %+v", done.Usage)
+	}
+	if len(client.messages) != 1 || client.messages[0].Content != "你好" {
+		t.Fatalf("messages = %+v", client.messages)
+	}
+}
+
+func TestHandlerChatStreamOmitsUsageWhenUnavailable(t *testing.T) {
+	client := &fakeStreamingClient{
+		stream: &fakeStream{chunks: []llm.StreamChunk{{
+			Sequence: 1,
+			ID:       "chatcmpl-stream",
+			Model:    "deepseek-flash",
+			Choices: []llm.StreamChoice{{
+				Index: 0,
+				Delta: llm.Message{Content: "hello"},
+			}},
+		}}},
+	}
+	response := httptest.NewRecorder()
+	handler := NewHandler(client, nil)
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	))
+
+	events := parseSSEEvents(t, response.Body.String())
+	var done map[string]json.RawMessage
+	if err := json.Unmarshal(events[len(events)-1].Data, &done); err != nil {
+		t.Fatalf("decode done event: %v", err)
+	}
+	if _, ok := done["usage"]; ok {
+		t.Fatal("done event contains usage without upstream usage")
+	}
+}
+
+func TestHandlerChatStreamRejectsInvalidRequests(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		message string
+	}{
+		{name: "malformed JSON", body: `{"messages":[}`, message: "invalid JSON body"},
+		{name: "empty messages", body: `{"messages":[]}`, message: "messages must not be empty"},
+		{name: "invalid role", body: `{"messages":[{"role":"tool","content":"hi"}]}`, message: "messages[0].role"},
+		{name: "empty content", body: `{"messages":[{"role":"user","content":"  "}]}`, message: "messages[0].content"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(&fakeStreamingClient{}, nil)
+			request := httptest.NewRequest(http.MethodPost, "/chat/stream", strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			assertErrorResponse(t, response, http.StatusBadRequest, "invalid_request", test.message)
+		})
+	}
+}
+
+func TestHandlerChatStreamRejectsOversizedBody(t *testing.T) {
+	handler := NewHandler(&fakeStreamingClient{}, nil)
+	body := `{"messages":[{"role":"user","content":"` + strings.Repeat("x", maxRequestBodySize) + `"}` + "}"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/chat/stream", strings.NewReader(body)))
+
+	assertErrorResponse(t, response, http.StatusBadRequest, "invalid_request", "request body too large")
+}
+
+func TestHandlerChatStreamMapsPreHeaderErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		statusCode int
+		code       string
+	}{
+		{
+			name:       "api error",
+			err:        &llm.APIError{StatusCode: http.StatusBadGateway, Message: "upstream failed"},
+			statusCode: http.StatusBadGateway,
+			code:       "model_error",
+		},
+		{
+			name:       "timeout",
+			err:        context.DeadlineExceeded,
+			statusCode: http.StatusGatewayTimeout,
+			code:       "model_timeout",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(&fakeStreamingClient{streamErr: test.err}, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(
+				http.MethodPost,
+				"/chat/stream",
+				strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+			))
+			assertErrorResponse(t, response, test.statusCode, test.code, "")
+		})
+	}
+}
+
+func TestHandlerChatStreamWritesPostHeaderErrorEvent(t *testing.T) {
+	client := &fakeStreamingClient{
+		stream: &fakeStream{
+			chunks: []llm.StreamChunk{{
+				Sequence: 1,
+				ID:       "chatcmpl-stream",
+				Model:    "deepseek-flash",
+				Choices: []llm.StreamChoice{{
+					Index: 0,
+					Delta: llm.Message{Content: "partial"},
+				}},
+			}},
+			errs: []error{nil, &llm.APIError{StatusCode: http.StatusBadGateway}},
+		},
+	}
+	response := httptest.NewRecorder()
+	handler := NewHandler(client, nil)
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	))
+
+	events := parseSSEEvents(t, response.Body.String())
+	if len(events) != 2 || events[0].Name != "message.delta" || events[1].Name != "error" {
+		t.Fatalf("events = %+v", events)
+	}
+	var event streamErrorEvent
+	if err := json.Unmarshal(events[1].Data, &event); err != nil {
+		t.Fatalf("decode error event: %v", err)
+	}
+	if event.Code != "model_error" || event.RequestID == "" {
+		t.Fatalf("error event = %+v", event)
+	}
+}
+
+func TestHandlerChatStreamRejectsOutOfOrderSequence(t *testing.T) {
+	client := &fakeStreamingClient{
+		stream: &fakeStream{chunks: []llm.StreamChunk{
+			{Sequence: 1, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
+			{Sequence: 3, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "three"}}}},
+		}},
+	}
+	response := httptest.NewRecorder()
+	handler := NewHandler(client, nil)
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	))
+
+	events := parseSSEEvents(t, response.Body.String())
+	if len(events) != 2 || events[1].Name != "error" {
+		t.Fatalf("events = %+v", events)
+	}
+	var event streamErrorEvent
+	if err := json.Unmarshal(events[1].Data, &event); err != nil {
+		t.Fatalf("decode error event: %v", err)
+	}
+	if event.Code != "model_error" || event.Message != "stream sequence is out of order" {
+		t.Fatalf("error event = %+v", event)
+	}
+}
+
+func TestHandlerChatStreamRejectsDuplicateSequence(t *testing.T) {
+	client := &fakeStreamingClient{
+		stream: &fakeStream{chunks: []llm.StreamChunk{
+			{Sequence: 1, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
+			{Sequence: 1, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "duplicate"}}}},
+		}},
+	}
+	response := httptest.NewRecorder()
+	handler := NewHandler(client, nil)
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	))
+
+	events := parseSSEEvents(t, response.Body.String())
+	if len(events) != 2 || events[1].Name != "error" {
+		t.Fatalf("events = %+v", events)
+	}
+	var event streamErrorEvent
+	if err := json.Unmarshal(events[1].Data, &event); err != nil {
+		t.Fatalf("decode error event: %v", err)
+	}
+	if event.Code != "model_error" || event.Message != "stream sequence is out of order" {
+		t.Fatalf("error event = %+v", event)
+	}
+}
+
+func TestHandlerChatStreamStopsOnCanceledContext(t *testing.T) {
+	handler := NewHandler(&fakeStreamingClient{}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response := &trackingResponseWriter{header: make(http.Header)}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	).WithContext(ctx)
+
+	handler.ServeHTTP(response, request)
+	if response.wrote {
+		t.Fatal("handler wrote a response after request context cancellation")
+	}
+}
+
+func TestHandlerChatStreamStopsAfterHeaderWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &fakeStreamingClient{
+		stream: &fakeStream{
+			recvFunc: func() (llm.StreamChunk, error) {
+				cancel()
+				return llm.StreamChunk{}, context.Canceled
+			},
+		},
+	}
+	handler := NewHandler(client, nil)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	).WithContext(ctx)
+
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("body = %q, want no event after cancellation", response.Body.String())
+	}
+}
+
+func TestHandlerChatStreamRequiresStreamingClient(t *testing.T) {
+	handler := NewHandler(&fakeChatClient{}, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	))
+
+	assertErrorResponse(t, response, http.StatusInternalServerError, "internal_error", "streaming model client")
+}
+
+func TestHandlerChatStreamRequiresFlusher(t *testing.T) {
+	handler := NewHandler(&fakeStreamingClient{}, nil)
+	response := &nonFlushingResponseWriter{header: make(http.Header)}
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/chat/stream",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	))
+
+	if response.statusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", response.statusCode)
+	}
+	if !strings.Contains(response.body.String(), "streaming response is unsupported") {
+		t.Fatalf("body = %q", response.body.String())
+	}
+}
+
 func assertErrorResponse(t *testing.T, response *httptest.ResponseRecorder, statusCode int, code, message string) {
 	t.Helper()
 	if response.Code != statusCode {
@@ -206,6 +553,85 @@ func (f *fakeChatClient) Chat(_ context.Context, messages []llm.Message) (llm.Ch
 	return f.response, f.err
 }
 
+type fakeStreamingClient struct {
+	messages  []llm.Message
+	stream    llm.ChatStream
+	streamErr error
+}
+
+func (f *fakeStreamingClient) Chat(_ context.Context, messages []llm.Message) (llm.ChatResponse, error) {
+	f.messages = append(f.messages, messages...)
+	return llm.ChatResponse{}, nil
+}
+
+func (f *fakeStreamingClient) ChatStream(_ context.Context, messages []llm.Message) (llm.ChatStream, error) {
+	f.messages = append(f.messages, messages...)
+	return f.stream, f.streamErr
+}
+
+type fakeStream struct {
+	chunks    []llm.StreamChunk
+	errs      []error
+	index     int
+	closeCall int
+	recvFunc  func() (llm.StreamChunk, error)
+}
+
+func (f *fakeStream) Recv() (llm.StreamChunk, error) {
+	if f.recvFunc != nil {
+		return f.recvFunc()
+	}
+	if f.index >= len(f.chunks) {
+		if f.index < len(f.errs) && f.errs[f.index] != nil {
+			err := f.errs[f.index]
+			f.index++
+			return llm.StreamChunk{}, err
+		}
+		return llm.StreamChunk{}, io.EOF
+	}
+	chunk := f.chunks[f.index]
+	var err error
+	if f.index < len(f.errs) {
+		err = f.errs[f.index]
+	}
+	f.index++
+	if err != nil {
+		return llm.StreamChunk{}, err
+	}
+	return chunk, nil
+}
+
+func (f *fakeStream) Close() error {
+	f.closeCall++
+	return nil
+}
+
+type sseTestEvent struct {
+	Name string
+	Data json.RawMessage
+}
+
+func parseSSEEvents(t *testing.T, body string) []sseTestEvent {
+	t.Helper()
+	var events []sseTestEvent
+	for _, block := range strings.Split(strings.TrimSpace(body), "\n\n") {
+		if block == "" {
+			continue
+		}
+		var event sseTestEvent
+		for _, line := range strings.Split(block, "\n") {
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				event.Name = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				event.Data = json.RawMessage(strings.TrimPrefix(line, "data: "))
+			}
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
 type trackingResponseWriter struct {
 	header http.Header
 	wrote  bool
@@ -222,4 +648,25 @@ func (w *trackingResponseWriter) WriteHeader(int) {
 func (w *trackingResponseWriter) Write([]byte) (int, error) {
 	w.wrote = true
 	return 0, nil
+}
+
+type nonFlushingResponseWriter struct {
+	header     http.Header
+	statusCode int
+	body       bytes.Buffer
+}
+
+func (w *nonFlushingResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *nonFlushingResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+}
+
+func (w *nonFlushingResponseWriter) Write(data []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.body.Write(data)
 }
