@@ -24,9 +24,10 @@ const (
 
 var (
 	// 这些错误供上层通过 errors.Is 判断，避免依赖错误字符串。
-	ErrMissingAPIKey = errors.New("llm api key is not configured")
-	ErrMissingModel  = errors.New("llm model is not configured")
-	ErrInvalidStream = errors.New("invalid llm stream")
+	ErrMissingAPIKey    = errors.New("llm api key is not configured")
+	ErrMissingModel     = errors.New("llm model is not configured")
+	ErrInvalidStream    = errors.New("invalid llm stream")
+	ErrResponseTooLarge = errors.New("llm response body exceeds size limit")
 )
 
 const (
@@ -77,11 +78,14 @@ type ChatStream interface {
 
 // StreamChunk 表示 OpenAI 兼容流式响应中的一个 SSE 数据块。
 type StreamChunk struct {
-	Sequence int
-	ID       string
-	Model    string
-	Choices  []StreamChoice
-	Usage    *Usage
+	// Sequence 在上游未提供序号时由客户端生成，仅用于对外事件编号。
+	// SequenceFromUpstream 为 true 时，Sequence 才代表上游明确提供的序号。
+	Sequence             int
+	SequenceFromUpstream bool
+	ID                   string
+	Model                string
+	Choices              []StreamChoice
+	Usage                *Usage
 }
 
 // StreamChoice 表示流式响应中的一个增量候选。
@@ -183,8 +187,16 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	defer response.Body.Close()
 
 	// 限制响应体大小，避免异常上游返回超大内容占用内存。
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodySize))
+	responseBody, err := readResponseBody(response.Body, maxResponseBodySize)
 	if err != nil {
+		if (response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices) &&
+			errors.Is(err, ErrResponseTooLarge) {
+			return ChatResponse{}, &APIError{
+				StatusCode: response.StatusCode,
+				RequestID:  response.Header.Get("X-Request-ID"),
+				Message:    "upstream error response unavailable",
+			}
+		}
 		return ChatResponse{}, fmt.Errorf("read llm response: %w", err)
 	}
 
@@ -196,7 +208,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 			"status", response.StatusCode,
 			"request_id", requestID,
 			"duration_ms", durationMilliseconds(time.Since(startedAt)),
-			"error", apiErr,
+			"error_type", "api_error",
 		)
 		return ChatResponse{}, apiErr
 	}
@@ -279,8 +291,15 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 	requestID := response.Header.Get("X-Request-ID")
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		defer response.Body.Close()
-		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBodySize))
+		responseBody, readErr := readResponseBody(response.Body, maxResponseBodySize)
 		if readErr != nil {
+			if errors.Is(readErr, ErrResponseTooLarge) {
+				return nil, &APIError{
+					StatusCode: response.StatusCode,
+					RequestID:  requestID,
+					Message:    "upstream error response unavailable",
+				}
+			}
 			return nil, fmt.Errorf("read llm stream error response: %w", readErr)
 		}
 		apiErr := parseAPIError(response.StatusCode, requestID, responseBody)
@@ -288,7 +307,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 			"status", response.StatusCode,
 			"request_id", requestID,
 			"duration_ms", durationMilliseconds(time.Since(startedAt)),
-			"error", apiErr,
+			"error_type", "api_error",
 		)
 		return nil, apiErr
 	}
@@ -304,6 +323,17 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 
 func durationMilliseconds(duration time.Duration) float64 {
 	return float64(duration) / float64(time.Millisecond)
+}
+
+func readResponseBody(reader io.Reader, maxSize int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxSize {
+		return nil, fmt.Errorf("%w: limit=%d", ErrResponseTooLarge, maxSize)
+	}
+	return body, nil
 }
 
 type chatRequest struct {
@@ -356,10 +386,11 @@ func (s *chatStream) Recv() (StreamChunk, error) {
 			return StreamChunk{}, io.EOF
 		}
 		var wire struct {
-			ID      string         `json:"id"`
-			Model   string         `json:"model"`
-			Choices []StreamChoice `json:"choices"`
-			Usage   *Usage         `json:"usage"`
+			Sequence *int           `json:"sequence"`
+			ID       string         `json:"id"`
+			Model    string         `json:"model"`
+			Choices  []StreamChoice `json:"choices"`
+			Usage    *Usage         `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(data), &wire); err != nil {
 			return StreamChunk{}, fmt.Errorf("%w: decode data event: %v", ErrInvalidStream, err)
@@ -369,12 +400,19 @@ func (s *chatStream) Recv() (StreamChunk, error) {
 		}
 
 		s.sequence++
+		sequence := s.sequence
+		sequenceFromUpstream := false
+		if wire.Sequence != nil {
+			sequence = *wire.Sequence
+			sequenceFromUpstream = true
+		}
 		return StreamChunk{
-			Sequence: s.sequence,
-			ID:       wire.ID,
-			Model:    wire.Model,
-			Choices:  wire.Choices,
-			Usage:    wire.Usage,
+			Sequence:             sequence,
+			SequenceFromUpstream: sequenceFromUpstream,
+			ID:                   wire.ID,
+			Model:                wire.Model,
+			Choices:              wire.Choices,
+			Usage:                wire.Usage,
 		}, nil
 	}
 }
@@ -399,43 +437,14 @@ func (s *chatStream) readEvent() (string, error) {
 
 	// 逐行读取当前 SSE 事件，直到遇到空行表示事件结束。
 	for {
-		line, err := s.reader.ReadString('\n')
-		if line != "" {
-			line = strings.TrimSuffix(line, "\n")
-			line = strings.TrimSuffix(line, "\r")
-			eventSize += len(line)
-			if eventSize > maxStreamEventSize {
-				return "", fmt.Errorf("%w: event exceeds %d bytes", ErrInvalidStream, maxStreamEventSize)
-			}
-
-			if line == "" {
-				if hasData {
-					// 空行表示当前 SSE 事件结束，交给 Recv 解析 data 内容。
-					return data.String(), nil
-				}
-				continue
-			}
-			if strings.HasPrefix(line, ":") {
-				continue
-			}
-			switch {
-			case strings.HasPrefix(line, "data:"):
-				value := strings.TrimPrefix(line, "data:")
-				value = strings.TrimPrefix(value, " ")
-				if hasData {
-					data.WriteByte('\n')
-				}
-				data.WriteString(value)
-				hasData = true
-			case strings.HasPrefix(line, "event:"), strings.HasPrefix(line, "id:"), strings.HasPrefix(line, "retry:"):
-				// These SSE fields are valid but are not needed by the model protocol.
-			default:
-				return "", fmt.Errorf("%w: unsupported SSE field", ErrInvalidStream)
-			}
-		}
-
+		line, err := s.readLine()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				if line != "" {
+					if err := processEventLine(line, &data, &hasData, &eventSize); err != nil {
+						return "", err
+					}
+				}
 				// 允许最后一个事件没有额外的空行；调用方会继续读取并验证
 				// 它是否确实是 [DONE]，避免把正常结束误判为半包。
 				if hasData {
@@ -446,7 +455,68 @@ func (s *chatStream) readEvent() (string, error) {
 			}
 			return "", err
 		}
+
+		if line == "" {
+			if hasData {
+				// 空行表示当前 SSE 事件结束，交给 Recv 解析 data 内容。
+				return data.String(), nil
+			}
+			continue
+		}
+		if err := processEventLine(line, &data, &hasData, &eventSize); err != nil {
+			return "", err
+		}
 	}
+}
+
+func (s *chatStream) readLine() (string, error) {
+	line := make([]byte, 0, 128)
+	for {
+		part, isPrefix, err := s.reader.ReadLine()
+		if len(part) > maxStreamEventSize-len(line) {
+			return "", fmt.Errorf("%w: event exceeds %d bytes", ErrInvalidStream, maxStreamEventSize)
+		}
+		line = append(line, part...)
+		if err != nil {
+			if errors.Is(err, io.EOF) && len(line) > 0 {
+				return string(line), io.EOF
+			}
+			return "", err
+		}
+		if !isPrefix {
+			if len(line) > maxStreamEventSize {
+				return "", fmt.Errorf("%w: event exceeds %d bytes", ErrInvalidStream, maxStreamEventSize)
+			}
+			return string(line), err
+		}
+	}
+}
+
+func processEventLine(line string, data *strings.Builder, hasData *bool, eventSize *int) error {
+	line = strings.TrimSuffix(line, "\r")
+	*eventSize += len(line)
+	if *eventSize > maxStreamEventSize {
+		return fmt.Errorf("%w: event exceeds %d bytes", ErrInvalidStream, maxStreamEventSize)
+	}
+
+	if strings.HasPrefix(line, ":") {
+		return nil
+	}
+	switch {
+	case strings.HasPrefix(line, "data:"):
+		value := strings.TrimPrefix(line, "data:")
+		value = strings.TrimPrefix(value, " ")
+		if *hasData {
+			data.WriteByte('\n')
+		}
+		data.WriteString(value)
+		*hasData = true
+	case strings.HasPrefix(line, "event:"), strings.HasPrefix(line, "id:"), strings.HasPrefix(line, "retry:"):
+		// These SSE fields are valid but are not needed by the model protocol.
+	default:
+		return fmt.Errorf("%w: unsupported SSE field", ErrInvalidStream)
+	}
+	return nil
 }
 
 type apiErrorEnvelope struct {

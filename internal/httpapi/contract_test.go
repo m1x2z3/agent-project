@@ -199,7 +199,7 @@ func assertOpenAPIChatContract(t *testing.T, pathItem map[string]any, streaming 
 	}
 
 	responses := operation["responses"].(map[string]any)
-	for _, status := range []string{"200", "400", "500", "502", "504"} {
+	for _, status := range []string{"200", "400", "405", "500", "502", "504"} {
 		if _, ok := responses[status]; !ok {
 			t.Fatalf("missing %s response for streaming=%t", status, streaming)
 		}

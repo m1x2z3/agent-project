@@ -17,6 +17,13 @@ import (
 
 const shutdownTimeout = 10 * time.Second
 
+const (
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 10 * time.Second
+	idleTimeout       = 60 * time.Second
+	writeTimeoutGrace = 30 * time.Second
+)
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -29,8 +36,11 @@ func main() {
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           httpapi.NewHandler(client, logger),
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+		// 流式响应的最大写入时间基于模型超时，再留出网络和收尾缓冲。
+		WriteTimeout: cfg.LLMTimeout + writeTimeoutGrace,
 	}
 
 	runServer(server, logger)

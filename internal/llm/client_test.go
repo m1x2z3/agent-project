@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -76,11 +77,12 @@ func TestClientChat(t *testing.T) {
 }
 
 func TestClientChatReturnsAPIError(t *testing.T) {
+	var logs bytes.Buffer
 	client := NewClient(config.Config{
 		LLMBaseURL: "https://example.test",
 		LLMAPIKey:  "bad-key",
 		LLMModel:   "test-model",
-	}, nil)
+	}, slog.New(slog.NewTextHandler(&logs, nil)))
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			header := make(http.Header)
@@ -105,6 +107,12 @@ func TestClientChatReturnsAPIError(t *testing.T) {
 	}
 	if apiErr.RequestID != "req-error" {
 		t.Fatalf("request id = %q", apiErr.RequestID)
+	}
+	if strings.Contains(logs.String(), "invalid api key") {
+		t.Fatalf("log contains upstream error message: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "error_type=api_error") {
+		t.Fatalf("log does not contain structured error type: %q", logs.String())
 	}
 }
 
@@ -136,6 +144,29 @@ func TestClientChatRejectsEmptyMessages(t *testing.T) {
 	_, err := client.Chat(context.Background(), nil)
 	if err == nil || !strings.Contains(err.Error(), "at least one message") {
 		t.Fatalf("error = %v, want empty message validation error", err)
+	}
+}
+
+func TestClientChatRejectsOversizedResponse(t *testing.T) {
+	client := NewClient(config.Config{
+		LLMBaseURL: "http://example.test",
+		LLMAPIKey:  "test-key",
+		LLMModel:   "test-model",
+	}, nil)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", maxResponseBodySize+1))),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	_, err := client.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("error = %v, want ErrResponseTooLarge", err)
 	}
 }
 
@@ -205,6 +236,9 @@ func TestClientChatStreamParsesSSE(t *testing.T) {
 	if first.Sequence != 1 || first.ID != "chatcmpl-stream" || first.Choices[0].Delta.Content != "你" {
 		t.Fatalf("unexpected first chunk: %+v", first)
 	}
+	if first.SequenceFromUpstream {
+		t.Fatal("first sequence should be client-generated")
+	}
 	if first.Choices[0].Delta.Role != "assistant" {
 		t.Fatalf("role = %q, want assistant", first.Choices[0].Delta.Role)
 	}
@@ -236,14 +270,59 @@ func TestClientChatStreamParsesSSE(t *testing.T) {
 	}
 }
 
+func TestClientChatStreamParsesUpstreamSequence(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"sequence":7,"id":"chatcmpl-stream","choices":[{"index":0,"delta":{"content":"one"}}]}`,
+		"",
+		`data: {"sequence":8,"id":"chatcmpl-stream","choices":[{"index":0,"delta":{"content":"two"}}]}`,
+		"",
+		`data: [DONE]`,
+	}, "\n")
+	client := NewClient(config.Config{
+		LLMBaseURL: "https://example.test",
+		LLMAPIKey:  "test-key",
+		LLMModel:   "test-model",
+	}, nil)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	stream, err := client.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	defer stream.Close()
+
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("first Recv() error = %v", err)
+	}
+	second, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("second Recv() error = %v", err)
+	}
+	if first.Sequence != 7 || second.Sequence != 8 ||
+		!first.SequenceFromUpstream || !second.SequenceFromUpstream {
+		t.Fatalf("unexpected upstream sequence metadata: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestClientChatStreamMapsAPIErrors(t *testing.T) {
 	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusBadGateway} {
 		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			var logs bytes.Buffer
 			client := NewClient(config.Config{
 				LLMBaseURL: "https://example.test",
 				LLMAPIKey:  "test-key",
 				LLMModel:   "test-model",
-			}, nil)
+			}, slog.New(slog.NewTextHandler(&logs, nil)))
 			client.httpClient = &http.Client{
 				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					header := make(http.Header)
@@ -266,6 +345,12 @@ func TestClientChatStreamMapsAPIErrors(t *testing.T) {
 			}
 			if apiErr.StatusCode != statusCode || apiErr.RequestID != "upstream-request" {
 				t.Fatalf("unexpected API error: %+v", apiErr)
+			}
+			if strings.Contains(logs.String(), "upstream failed") {
+				t.Fatalf("log contains upstream error message: %q", logs.String())
+			}
+			if !strings.Contains(logs.String(), "error_type=api_error") {
+				t.Fatalf("log does not contain structured error type: %q", logs.String())
 			}
 		})
 	}

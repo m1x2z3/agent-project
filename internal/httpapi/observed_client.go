@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"agent-project/internal/llm"
@@ -95,7 +96,9 @@ type observedChatStream struct {
 	firstTokenRecorded  bool
 	finishReason        string
 	usage               *llm.Usage
-	finished            bool
+	closeOnce           sync.Once
+	closeErr            error
+	finishOnce          sync.Once
 }
 
 func (s *observedChatStream) Recv() (llm.StreamChunk, error) {
@@ -131,46 +134,43 @@ func (s *observedChatStream) Recv() (llm.StreamChunk, error) {
 }
 
 func (s *observedChatStream) Close() error {
-	err := s.next.Close()
-	if !s.finished {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.next.Close()
 		errorTypeValue := ""
 		if s.ctx.Err() != nil {
 			errorTypeValue = errorType(s.ctx.Err())
 		}
 		s.logFinal(errorTypeValue)
-	}
-	return err
+	})
+	return s.closeErr
 }
 
 func (s *observedChatStream) logFinal(streamErrorType string) {
-	if s.finished {
-		return
-	}
-	s.finished = true
-
-	attrs := []any{
-		"request_id", s.metadata.requestID,
-		"path", s.metadata.path,
-		"model_duration_ms", durationMilliseconds(s.establishedDuration),
-		"total_duration_ms", durationMilliseconds(time.Since(s.startedAt)),
-	}
-	if s.firstTokenRecorded {
-		attrs = append(attrs, "first_token_duration_ms", durationMilliseconds(s.firstTokenAt.Sub(s.startedAt)))
-	}
-	if s.finishReason != "" {
-		attrs = append(attrs, "finish_reason", s.finishReason)
-	}
-	if s.usage != nil {
-		attrs = append(attrs,
-			slog.Group("usage",
-				"prompt_tokens", s.usage.PromptTokens,
-				"completion_tokens", s.usage.CompletionTokens,
-				"total_tokens", s.usage.TotalTokens,
-			),
-		)
-	}
-	if streamErrorType != "" {
-		attrs = append(attrs, "error_type", streamErrorType)
-	}
-	s.logger.InfoContext(s.ctx, "model stream observed", attrs...)
+	s.finishOnce.Do(func() {
+		attrs := []any{
+			"request_id", s.metadata.requestID,
+			"path", s.metadata.path,
+			"model_duration_ms", durationMilliseconds(s.establishedDuration),
+			"total_duration_ms", durationMilliseconds(time.Since(s.startedAt)),
+		}
+		if s.firstTokenRecorded {
+			attrs = append(attrs, "first_token_duration_ms", durationMilliseconds(s.firstTokenAt.Sub(s.startedAt)))
+		}
+		if s.finishReason != "" {
+			attrs = append(attrs, "finish_reason", s.finishReason)
+		}
+		if s.usage != nil {
+			attrs = append(attrs,
+				slog.Group("usage",
+					"prompt_tokens", s.usage.PromptTokens,
+					"completion_tokens", s.usage.CompletionTokens,
+					"total_tokens", s.usage.TotalTokens,
+				),
+			)
+		}
+		if streamErrorType != "" {
+			attrs = append(attrs, "error_type", streamErrorType)
+		}
+		s.logger.InfoContext(s.ctx, "model stream observed", attrs...)
+	})
 }

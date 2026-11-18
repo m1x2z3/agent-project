@@ -38,6 +38,12 @@ type StreamingChatClient interface {
 	ChatStream(context.Context, []llm.Message) (llm.ChatStream, error)
 }
 
+type unavailableChatClient struct{}
+
+func (unavailableChatClient) Chat(context.Context, []llm.Message) (llm.ChatResponse, error) {
+	return llm.ChatResponse{}, errors.New("chat client is unavailable")
+}
+
 // Handler 提供健康检查、非流式聊天和 SSE 流式聊天接口。
 type Handler struct {
 	client       ChatClient
@@ -68,6 +74,10 @@ type observedResponseWriter struct {
 
 type flushingObservedResponseWriter struct {
 	*observedResponseWriter
+}
+
+func (w *observedResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func newObservedResponseWriter(w http.ResponseWriter) responseObserver {
@@ -109,6 +119,9 @@ func (w *flushingObservedResponseWriter) Flush() {
 func NewHandler(client ChatClient, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if client == nil {
+		client = unavailableChatClient{}
 	}
 	handler := &Handler{
 		client:       &observedChatClient{next: client, logger: logger},
@@ -254,11 +267,13 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 	// 保存跨 chunk 的最终业务信息：序号用于检测重复/乱序，
 	// 其他字段用于组装最后的 message.done 事件。
 	var (
-		expectedSequence = 1
-		responseID       string
-		responseModel    string
-		usage            *llm.Usage
-		finishReason     *string
+		eventSequence       = 1
+		upstreamSequence    int
+		hasUpstreamSequence bool
+		responseID          string
+		responseModel       string
+		usage               *llm.Usage
+		finishReason        *string
 	)
 
 	for {
@@ -293,13 +308,21 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 			return
 		}
 
-		// 每个数据块都必须按 1、2、3... 顺序到达，防止重复或乱序事件
-		// 破坏客户端拼接结果。
-		if chunk.Sequence != expectedSequence {
-			h.writeStreamError(w, flusher, "model_error", "stream sequence is out of order", requestID)
-			return
+		// 只有模型客户端明确声明序号来自上游时，才校验上游顺序。
+		// 标准 OpenAI 兼容 SSE 通常没有序号，此时 Sequence 是客户端本地生成的，
+		// 不能把它误认为模型服务提供了顺序保证。
+		if chunk.SequenceFromUpstream {
+			if !hasUpstreamSequence {
+				upstreamSequence = chunk.Sequence
+				hasUpstreamSequence = true
+			} else {
+				upstreamSequence++
+				if chunk.Sequence != upstreamSequence {
+					h.writeStreamError(w, flusher, "model_error", "stream sequence is out of order", requestID)
+					return
+				}
+			}
 		}
-		expectedSequence++
 
 		// 记录模型返回的元数据和 usage。部分供应商只在最后的 usage chunk
 		// 中返回 Token 统计，因此这里需要跨多个 chunk 保存最新值。
@@ -322,10 +345,11 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 			event := streamDeltaEvent{
 				ID:       chunk.ID,
 				Model:    chunk.Model,
-				Sequence: chunk.Sequence,
+				Sequence: eventSequence,
 				Index:    choice.Index,
 				Delta:    choice.Delta,
 			}
+			eventSequence++
 			// 上游后续 chunk 可能省略 id/model，此时沿用之前保存的元数据。
 			if event.ID == "" {
 				event.ID = responseID

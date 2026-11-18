@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-project/internal/llm"
 )
@@ -32,6 +33,38 @@ func TestHandlerHealth(t *testing.T) {
 	if body.Status != "ok" {
 		t.Fatalf("status = %q, want ok", body.Status)
 	}
+}
+
+func TestHandlerRejectsUnsupportedMethods(t *testing.T) {
+	handler := NewHandler(&fakeChatClient{}, nil)
+	tests := []struct {
+		path   string
+		method string
+	}{
+		{path: "/health", method: http.MethodPost},
+		{path: "/chat", method: http.MethodGet},
+		{path: "/chat/stream", method: http.MethodGet},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+			assertErrorResponse(t, response, http.StatusMethodNotAllowed, "method_not_allowed", "")
+		})
+	}
+}
+
+func TestHandlerWithNilClientReturnsInternalError(t *testing.T) {
+	handler := NewHandler(nil, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/chat",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	))
+
+	assertErrorResponse(t, response, http.StatusInternalServerError, "internal_error", "")
 }
 
 func TestHandlerHealthLogsTotalDuration(t *testing.T) {
@@ -399,6 +432,30 @@ func TestHandlerChatStreamLogsErrorWithoutSuccessFields(t *testing.T) {
 	}
 }
 
+func TestObservedChatStreamCloseIsIdempotent(t *testing.T) {
+	closeErr := errors.New("close failed")
+	stream := &fakeStream{closeErr: closeErr}
+	observed := &observedChatStream{
+		next:      stream,
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ctx:       context.Background(),
+		startedAt: time.Now(),
+	}
+
+	firstErr := observed.Close()
+	secondErr := observed.Close()
+
+	if !errors.Is(firstErr, closeErr) || !errors.Is(secondErr, closeErr) {
+		t.Fatalf("close errors = %v, %v; want %v", firstErr, secondErr, closeErr)
+	}
+	if firstErr != secondErr {
+		t.Fatalf("close error pointers differ: first=%p second=%p", firstErr, secondErr)
+	}
+	if stream.closeCall != 1 {
+		t.Fatalf("close count = %d, want 1", stream.closeCall)
+	}
+}
+
 func TestHandlerChatStreamOmitsUsageWhenUnavailable(t *testing.T) {
 	client := &fakeStreamingClient{
 		stream: &fakeStream{chunks: []llm.StreamChunk{{
@@ -535,8 +592,8 @@ func TestHandlerChatStreamWritesPostHeaderErrorEvent(t *testing.T) {
 func TestHandlerChatStreamRejectsOutOfOrderSequence(t *testing.T) {
 	client := &fakeStreamingClient{
 		stream: &fakeStream{chunks: []llm.StreamChunk{
-			{Sequence: 1, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
-			{Sequence: 3, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "three"}}}},
+			{Sequence: 1, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
+			{Sequence: 3, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "three"}}}},
 		}},
 	}
 	response := httptest.NewRecorder()
@@ -563,8 +620,8 @@ func TestHandlerChatStreamRejectsOutOfOrderSequence(t *testing.T) {
 func TestHandlerChatStreamRejectsDuplicateSequence(t *testing.T) {
 	client := &fakeStreamingClient{
 		stream: &fakeStream{chunks: []llm.StreamChunk{
-			{Sequence: 1, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
-			{Sequence: 1, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "duplicate"}}}},
+			{Sequence: 1, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "one"}}}},
+			{Sequence: 1, SequenceFromUpstream: true, Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "duplicate"}}}},
 		}},
 	}
 	response := httptest.NewRecorder()
@@ -722,6 +779,7 @@ type fakeStream struct {
 	errs      []error
 	index     int
 	closeCall int
+	closeErr  error
 	recvFunc  func() (llm.StreamChunk, error)
 }
 
@@ -751,7 +809,7 @@ func (f *fakeStream) Recv() (llm.StreamChunk, error) {
 
 func (f *fakeStream) Close() error {
 	f.closeCall++
-	return nil
+	return f.closeErr
 }
 
 type sseTestEvent struct {
