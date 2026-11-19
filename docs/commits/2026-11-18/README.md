@@ -54,7 +54,9 @@
 - 补充上述边界场景的回归测试，覆盖 `Allow` Header、空流/不完整流、端点脱敏和网络错误分类。
 - 验证通过：`go test ./...`、`go vet ./...`、`go test -race ./...`。
 
-## 第二周第 1 天：Eino 抽象（待确认，未提交）
+## 第二周第 1 天：Eino 抽象
+
+对应 commit：`0651b5d`。
 
 - 锁定 Eino `v0.9.23`。
 - 新增 `internal/agent`，完成 Prompt、Demo ChatModel、Lambda、Chain 和 Graph 最小调用链。
@@ -63,3 +65,20 @@
 - 增加离线示例入口：`go run ./cmd/eino-demo`。
 - 未修改现有 `/chat`、`/chat/stream` 和 `internal/llm` 行为。
 - 验证通过：`go test ./...`、`go vet ./...`、`go test -race ./...`。
+
+## 第二周第 2 天：模型网关接口
+
+- 新增 `internal/modelgateway`，提供供应商无关的 `ChatRequest`、`ChatResponse`、
+  `ModelProvider`、Provider 健康状态和路由器。
+- 支持 DeepSeek、Kimi 等 OpenAI 兼容供应商使用同一适配器。
+- 扩展配置以支持 `LLM_PROVIDERS`、默认供应商、任务路由、独立模型参数和
+  `LLM_MAX_TOKENS`，同时保留旧的单供应商 `.env` 配置。
+- 统一转换上游错误，不记录 API Key、完整 Prompt 或供应商原始错误消息。
+- 新增模型网关边界说明：`docs/notes/模型网关边界-2026-11-18.md`。
+- 将网关代码按职责拆分为 `contracts.go`、`errors.go`、`provider_openai.go`
+  和 `router.go`。
+- 将 HTTP 层接口命名为 `HTTPChatClient`、`HTTPStreamingChatClient`，
+  将 OpenAI 适配器内部客户端接口命名为 `openAICompatibleClient`。
+- 保持现有 `/chat`、`/chat/stream`、Eino 编排和 HTTP 契约不变。
+- 验证通过：`go test ./...`、`go vet ./...`。
+- 对应 commit：`3e559ac`。

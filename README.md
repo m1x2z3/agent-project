@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第二周第 1 天：Eino 最小编排与模型调用边界。
+第二周第 2 天：模型网关接口与供应商隔离。
 
 本周目标：
 
@@ -14,6 +14,7 @@
 - 提供 SSE 流式 HTTP 聊天 API
 - 建立超时、取消、错误响应和单元测试基础
 - 使用 Eino 验证 Prompt、Model、Lambda、Chain 和 Graph 的最小调用链
+- 使用模型网关统一 DeepSeek、Kimi 等 OpenAI 兼容供应商
 
 ## 项目结构
 
@@ -73,6 +74,11 @@ go run ./cmd/eino-demo
 示例同时执行 `Prompt -> Model -> Lambda` 的 Chain 和
 `START -> Prompt -> Model -> Lambda -> END` 的 Graph。Eino 只存在于
 `internal/agent` 编排边界，HTTP Handler 和 `internal/llm` 不依赖 Eino 类型。
+
+模型网关位于 `internal/modelgateway`，负责供应商选择、任务路由、配置健康状态
+和统一错误分类；`internal/llm` 继续负责 OpenAI 兼容 HTTP/SSE 协议。当前 HTTP
+接口仍保持原有 `llm.Client` 链路，网关先作为独立的可测试能力存在，避免本日改动
+已有 `/chat` 和 `/chat/stream` 契约。
 
 项目提供三个 Go Fuzz 入口，用于验证请求 JSON、消息校验和 SSE 解析边界：
 
@@ -138,7 +144,33 @@ curl -N -X POST http://localhost:8080/chat/stream \
 | `LLM_API_KEY` | 模型服务 API Key |
 | `LLM_MODEL` | 使用的模型名称 |
 | `LLM_TEMPERATURE` | 模型采样温度 |
+| `LLM_MAX_TOKENS` | 单次调用最大输出 Token，`0` 表示不发送该字段 |
 | `LLM_TIMEOUT` | 单次模型调用超时时间 |
+
+启用多供应商模型网关时，可以使用以下配置：
+
+```dotenv
+LLM_PROVIDERS=deepseek,kimi
+LLM_DEFAULT_PROVIDER=deepseek
+LLM_ROUTE_CHAT=deepseek
+
+LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+LLM_DEEPSEEK_API_KEY=
+LLM_DEEPSEEK_MODEL=
+LLM_DEEPSEEK_TEMPERATURE=0.2
+LLM_DEEPSEEK_MAX_TOKENS=0
+LLM_DEEPSEEK_TIMEOUT=30s
+
+LLM_KIMI_BASE_URL=https://api.moonshot.cn/v1
+LLM_KIMI_API_KEY=
+LLM_KIMI_MODEL=
+LLM_KIMI_TEMPERATURE=0.2
+LLM_KIMI_MAX_TOKENS=0
+LLM_KIMI_TIMEOUT=30s
+```
+
+网关选择顺序为：请求显式 Provider、任务路由、默认 Provider。当前阶段不自动
+重试、降级或故障转移；未知或配置不健康的供应商会返回明确错误。
 
 ## 开发约定
 

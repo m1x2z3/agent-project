@@ -22,6 +22,7 @@ func TestClientChat(t *testing.T) {
 		LLMAPIKey:      "test-key",
 		LLMModel:       "test-model",
 		LLMTemperature: 0.4,
+		LLMMaxTokens:   128,
 		LLMTimeout:     time.Second,
 	}, slog.Default())
 	client.httpClient = &http.Client{
@@ -62,7 +63,7 @@ func TestClientChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
-	if received.Model != "test-model" || received.Temperature != 0.4 {
+	if received.Model != "test-model" || received.Temperature != 0.4 || received.MaxTokens != 128 {
 		t.Fatalf("unexpected request: %+v", received)
 	}
 	if len(received.Messages) != 1 || received.Messages[0].Content != "hi" {

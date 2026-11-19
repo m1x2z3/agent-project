@@ -102,6 +102,7 @@ type Client struct {
 	apiKey      string
 	model       string
 	temperature float64
+	maxTokens   int
 	httpClient  *http.Client
 	logger      *slog.Logger
 }
@@ -125,6 +126,7 @@ func NewClient(cfg config.Config, logger *slog.Logger) *Client {
 		apiKey:      strings.TrimSpace(cfg.LLMAPIKey),
 		model:       strings.TrimSpace(cfg.LLMModel),
 		temperature: cfg.LLMTemperature,
+		maxTokens:   cfg.LLMMaxTokens,
 		httpClient:  httpClient,
 		logger:      logger,
 	}
@@ -153,6 +155,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 		Model:       c.model,
 		Messages:    messages,
 		Temperature: c.temperature,
+		MaxTokens:   c.maxTokens,
 	}
 	body, err := json.Marshal(requestBody)
 	if err != nil {
@@ -255,6 +258,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (ChatStream
 		Model:       c.model,
 		Messages:    messages,
 		Temperature: c.temperature,
+		MaxTokens:   c.maxTokens,
 		Stream:      true,
 	}
 	body, err := json.Marshal(requestBody)
@@ -363,6 +367,7 @@ type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
 }
 

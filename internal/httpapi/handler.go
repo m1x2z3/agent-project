@@ -26,15 +26,15 @@ var (
 	errTooManyMessages = errors.New("messages must not contain more than 32 items")
 )
 
-// ChatClient 是 HTTP 层依赖的最小模型客户端接口，便于隔离真实模型服务进行测试。
-type ChatClient interface {
+// HTTPChatClient 是 HTTP 层依赖的最小模型客户端接口，便于隔离真实模型服务进行测试。
+type HTTPChatClient interface {
 	Chat(context.Context, []llm.Message) (llm.ChatResponse, error)
 }
 
-// StreamingChatClient 是具备流式能力的可选模型客户端接口。
+// HTTPStreamingChatClient 是 HTTP 层具备流式能力的可选模型客户端接口。
 //
-// 它独立于 ChatClient，旧的非流式测试替身和调用方无需为了新增接口而修改。
-type StreamingChatClient interface {
+// 它独立于 HTTPChatClient，旧的非流式测试替身和调用方无需为了新增接口而修改。
+type HTTPStreamingChatClient interface {
 	ChatStream(context.Context, []llm.Message) (llm.ChatStream, error)
 }
 
@@ -46,8 +46,8 @@ func (unavailableChatClient) Chat(context.Context, []llm.Message) (llm.ChatRespo
 
 // Handler 提供健康检查、非流式聊天和 SSE 流式聊天接口。
 type Handler struct {
-	client       ChatClient
-	streaming    StreamingChatClient
+	client       HTTPChatClient
+	streaming    HTTPStreamingChatClient
 	logger       *slog.Logger
 	maxBodyBytes int64
 }
@@ -116,7 +116,7 @@ func (w *flushingObservedResponseWriter) Flush() {
 }
 
 // NewHandler 创建 HTTP API Handler。
-func NewHandler(client ChatClient, logger *slog.Logger) *Handler {
+func NewHandler(client HTTPChatClient, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -128,7 +128,7 @@ func NewHandler(client ChatClient, logger *slog.Logger) *Handler {
 		logger:       logger,
 		maxBodyBytes: maxRequestBodySize,
 	}
-	if streamingClient, ok := client.(StreamingChatClient); ok {
+	if streamingClient, ok := client.(HTTPStreamingChatClient); ok {
 		handler.streaming = &observedStreamingChatClient{
 			next:   streamingClient,
 			logger: logger,
@@ -212,7 +212,7 @@ func (h *Handler) handleChatStream(w http.ResponseWriter, r *http.Request, reque
 		return
 	}
 
-	// 流式接口是可选能力：保留 ChatClient 的同时，通过类型断言获取流式能力，
+	// 流式接口是可选能力：保留 HTTPChatClient 的同时，通过类型断言获取流式能力，
 	// 这样已有只支持非流式 Chat 的测试替身和调用方不需要同步改造。
 	if h.streaming == nil {
 		h.writeError(w, http.StatusInternalServerError, "internal_error", "streaming model client is unavailable", requestID)

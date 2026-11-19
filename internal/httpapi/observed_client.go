@@ -13,9 +13,9 @@ import (
 
 // observedChatClient 在模型客户端外层记录一次非流式调用的耗时和结果元数据。
 //
-// 这是 Decorator：业务 Handler 只依赖 ChatClient，不需要显式维护计时器或观测状态。
+// 这是 Decorator：业务 Handler 只依赖 HTTPChatClient，不需要显式维护计时器或观测状态。
 type observedChatClient struct {
-	next   ChatClient
+	next   HTTPChatClient
 	logger *slog.Logger
 }
 
@@ -46,7 +46,7 @@ func (c *observedChatClient) Chat(ctx context.Context, messages []llm.Message) (
 
 // observedStreamingChatClient 将流式调用包装成 observedChatStream。
 type observedStreamingChatClient struct {
-	next   StreamingChatClient
+	next   HTTPStreamingChatClient
 	logger *slog.Logger
 }
 
