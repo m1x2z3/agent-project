@@ -54,6 +54,7 @@ func (r *Registry) Activate(version string) error {
 	if _, exists := r.versions[version]; !exists {
 		return ErrVersionNotFound
 	}
+	// active 只是当前版本指针，不会修改或覆盖历史快照。
 	r.active = version
 	return nil
 }
@@ -151,17 +152,46 @@ func (r *Registry) BindRun(runID string) (RunSnapshot, error) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.bindRunLocked(runID, r.active)
+}
+
+// BindRunToVersion 将 Run 绑定到指定的已发布版本。
+//
+// 该方法用于灰度或回放场景：调用方先完成版本选择，再把本次 Run
+// 固定到对应快照。绑定后即使 active 版本变化，Run 仍然读取原版本。
+func (r *Registry) BindRunToVersion(runID string, releaseVersion string) (RunSnapshot, error) {
+	runID = strings.TrimSpace(runID)
+	releaseVersion = strings.TrimSpace(releaseVersion)
+	if runID == "" {
+		return RunSnapshot{}, ErrInvalidSnapshot
+	}
+	if releaseVersion == "" {
+		return RunSnapshot{}, ErrVersionNotFound
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bindRunLocked(runID, releaseVersion)
+}
+
+func (r *Registry) bindRunLocked(runID string, releaseVersion string) (RunSnapshot, error) {
+	// 调用方必须已经持有写锁。这里先把快照复制后存入 Registry，
+	// 返回时再复制一份，分别保护注册中心内部状态和调用方拿到的结果。
 	if _, exists := r.runs[runID]; exists {
 		return RunSnapshot{}, ErrRunAlreadyBound
 	}
-	if r.active == "" {
+	if releaseVersion == "" {
 		return RunSnapshot{}, ErrNoActiveVersion
+	}
+	snapshot, exists := r.versions[releaseVersion]
+	if !exists {
+		return RunSnapshot{}, ErrVersionNotFound
 	}
 
 	bound := RunSnapshot{
 		RunID:          runID,
-		ReleaseVersion: r.active,
-		Snapshot:       cloneSnapshot(r.versions[r.active]),
+		ReleaseVersion: releaseVersion,
+		Snapshot:       cloneSnapshot(snapshot),
 	}
 	r.runs[runID] = bound
 	return cloneRunSnapshot(bound), nil
@@ -266,6 +296,8 @@ func validateSnapshot(snapshot ConfigSnapshot) error {
 }
 
 func cloneSnapshot(snapshot ConfigSnapshot) ConfigSnapshot {
+	// 配置快照包含多个 map，仅复制外层结构是不够的。
+	// 这里复制所有 map，保证发布版本和 Run 快照不会被外部修改污染。
 	clone := snapshot
 	clone.Prompts = cloneMap(snapshot.Prompts)
 	clone.Schemas = cloneMap(snapshot.Schemas)
@@ -275,6 +307,7 @@ func cloneSnapshot(snapshot ConfigSnapshot) ConfigSnapshot {
 }
 
 func cloneRunSnapshot(snapshot RunSnapshot) RunSnapshot {
+	// RunSnapshot 还包含一层 ConfigSnapshot，因此需要继续复制内部配置 map。
 	snapshot.Snapshot = cloneSnapshot(snapshot.Snapshot)
 	return snapshot
 }

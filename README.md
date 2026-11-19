@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第二周第 4 天：配置版本和发布。
+第二周第 5 天：Runnable 组合与灰度。
 
 本周目标：
 
@@ -19,6 +19,9 @@
 - 通过最多一次的注入式修复处理有限的格式错误
 - 对 Prompt、Schema、模型路由和价格配置进行版本化管理
 - 为 Run 绑定不可变的配置快照
+- 使用 Eino Chain 串联配置选择、Prompt、模型调用和结构化输出
+- 按租户白名单和稳定流量桶选择候选配置版本
+- 支持不产生副作用的影子运行和确定性发布门禁评估
 
 ## 项目结构
 
@@ -29,6 +32,7 @@
 ├── internal/
 │   ├── agent/           # Agent 相关逻辑
 │   ├── configregistry/   # 配置版本、发布、回滚和 Run 快照
+│   ├── rollout/         # 灰度选择、影子发布和质量门禁
 │   ├── structuredoutput/ # 模型结构化输出、Schema 和语义校验
 │   ├── httpapi/         # HTTP Handler 和 API 类型
 │   ├── observability/   # 日志、指标和 Trace
@@ -99,6 +103,13 @@ Prompt、Schema、模型路由和价格配置快照。`Publish` 与 `Activate` �
 创建新的发布版本而不是修改历史版本；`BindRun` 会把 Run 固定到创建时的 active
 版本，避免新配置污染历史执行。当前不提供 HTTP 管理接口、不保存 API Key，也不
 接入数据库，后续再扩展为持久化控制面。
+
+Agent Runtime 位于 `internal/agent/runtime.go`，使用 Eino 的类型化 Runnable
+串联配置版本选择、Run 快照绑定、Prompt 渲染、两次模型调用和结构化结果校验。
+Runtime 只依赖 `ModelCaller` 接口，生产环境可以注入模型网关 Router，测试使用
+确定性 Fake。灰度选择和发布门禁位于 `internal/rollout`，当前只提供本地可验证
+实现，不修改 HTTP API，也不自动激活或回滚版本。影子运行只调用模型并解析结果，
+不会执行工具、写数据库或产生外部副作用。
 
 项目提供三个 Go Fuzz 入口，用于验证请求 JSON、消息校验和 SSE 解析边界：
 

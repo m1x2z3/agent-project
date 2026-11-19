@@ -230,6 +230,33 @@ func TestRegistryBindsRunToHistoricalSnapshot(t *testing.T) {
 	}
 }
 
+func TestRegistryBindsRunToSpecifiedPublishedVersion(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Publish(testSnapshot("v1", time.Now())); err != nil {
+		t.Fatalf("Publish(v1) error = %v", err)
+	}
+	if err := registry.Publish(testSnapshot("v2", time.Now().Add(time.Second))); err != nil {
+		t.Fatalf("Publish(v2) error = %v", err)
+	}
+	if err := registry.Activate("v1"); err != nil {
+		t.Fatalf("Activate(v1) error = %v", err)
+	}
+
+	bound, err := registry.BindRunToVersion("run-candidate", "v2")
+	if err != nil {
+		t.Fatalf("BindRunToVersion() error = %v", err)
+	}
+	if bound.ReleaseVersion != "v2" {
+		t.Fatalf("bound version = %q, want v2", bound.ReleaseVersion)
+	}
+	if _, err := registry.BindRunToVersion("run-candidate", "v1"); !errors.Is(err, ErrRunAlreadyBound) {
+		t.Fatalf("duplicate BindRunToVersion() error = %v, want ErrRunAlreadyBound", err)
+	}
+	if _, err := registry.BindRunToVersion("run-missing", "missing"); !errors.Is(err, ErrVersionNotFound) {
+		t.Fatalf("unknown version error = %v, want ErrVersionNotFound", err)
+	}
+}
+
 func TestRegistryResolvesStructuredOutputVersionReferences(t *testing.T) {
 	snapshot := testSnapshot("v1", time.Now())
 	references, err := snapshot.ResolveVersionReferences("main", "task_analysis", "chat")
