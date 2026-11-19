@@ -81,4 +81,4 @@
   将 OpenAI 适配器内部客户端接口命名为 `openAICompatibleClient`。
 - 保持现有 `/chat`、`/chat/stream`、Eino 编排和 HTTP 契约不变。
 - 验证通过：`go test ./...`、`go vet ./...`。
-- 对应 commit：`3e559ac`。
+- 对应 commit：`6b7dcd1`。
