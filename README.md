@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第二周第 2 天：模型网关接口与供应商隔离。
+第二周第 3 天：结构化输出内核。
 
 本周目标：
 
@@ -15,6 +15,8 @@
 - 建立超时、取消、错误响应和单元测试基础
 - 使用 Eino 验证 Prompt、Model、Lambda、Chain 和 Graph 的最小调用链
 - 使用模型网关统一 DeepSeek、Kimi 等 OpenAI 兼容供应商
+- 对模型输出执行 JSON Schema 和业务语义双重校验
+- 通过最多一次的注入式修复处理有限的格式错误
 
 ## 项目结构
 
@@ -24,6 +26,7 @@
 │   └── server/          # 服务启动入口
 ├── internal/
 │   ├── agent/           # Agent 相关逻辑
+│   ├── structuredoutput/ # 模型结构化输出、Schema 和语义校验
 │   ├── httpapi/         # HTTP Handler 和 API 类型
 │   ├── observability/   # 日志、指标和 Trace
 │   └── llm/             # 模型客户端封装
@@ -79,6 +82,14 @@ go run ./cmd/eino-demo
 和统一错误分类；`internal/llm` 继续负责 OpenAI 兼容 HTTP/SSE 协议。当前 HTTP
 接口仍保持原有 `llm.Client` 链路，网关先作为独立的可测试能力存在，避免本日改动
 已有 `/chat` 和 `/chat/stream` 契约。
+
+结构化输出内核位于 `internal/structuredoutput`，提供
+`DecodeTaskAnalysis`、`DecodeToolDecision` 和 `DecodeFinalAnswer` 三个类型安全
+入口。它先严格解析单个 JSON 值，再执行 JSON Schema 校验和业务语义校验；失败时
+最多调用一次注入的 `RepairFunc`，修复后仍需完整复核。调用方必须传入
+`provider`、`model`、`prompt_version`、`schema_version` 和
+`model_config_version`，解码报告会保留这些元数据。该包当前是独立内核，尚未接入
+HTTP、模型网关或数据库持久化。
 
 项目提供三个 Go Fuzz 入口，用于验证请求 JSON、消息校验和 SSE 解析边界：
 
