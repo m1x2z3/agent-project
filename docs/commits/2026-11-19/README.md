@@ -48,4 +48,33 @@
 - `go test ./...`：通过。
 - `go vet ./...`：通过。
 - `go test -race ./...`：通过。
-- 未进入第二周第 4 天。
+- 已进入第二周第 4 天，新增工作尚未提交，等待确认。
+
+## 第二周第 4 天：配置版本和发布
+
+状态：已完成开发和验证，待用户确认后提交。
+
+主要内容：
+
+- 新增 `internal/configregistry` 内存配置注册中心。
+- 支持 Prompt、Schema、模型路由和价格配置的不可变版本发布。
+- 支持版本激活、历史查询和基于历史版本创建新回滚版本。
+- 支持 Run 绑定创建时的 active 配置快照。
+- 增加深拷贝、并发访问、版本隔离和结构化输出版本映射测试。
+- 明确配置快照不保存 API Key，且不修改现有 HTTP、模型网关和结构化输出行为。
+
+涉及文件：
+
+- `internal/configregistry/types.go`
+- `internal/configregistry/errors.go`
+- `internal/configregistry/registry.go`
+- `internal/configregistry/registry_test.go`
+- `docs/notes/配置版本与发布边界-2026-11-19.md`
+- `README.md`
+
+验证结果：
+
+- `gofmt`：通过。
+- `go test ./internal/configregistry`：通过。
+- `go vet ./internal/configregistry`：通过。
+- 尚未执行 Git commit，未进入第二周第 5 天。

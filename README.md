@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第二周第 3 天：结构化输出内核。
+第二周第 4 天：配置版本和发布。
 
 本周目标：
 
@@ -17,6 +17,8 @@
 - 使用模型网关统一 DeepSeek、Kimi 等 OpenAI 兼容供应商
 - 对模型输出执行 JSON Schema 和业务语义双重校验
 - 通过最多一次的注入式修复处理有限的格式错误
+- 对 Prompt、Schema、模型路由和价格配置进行版本化管理
+- 为 Run 绑定不可变的配置快照
 
 ## 项目结构
 
@@ -26,6 +28,7 @@
 │   └── server/          # 服务启动入口
 ├── internal/
 │   ├── agent/           # Agent 相关逻辑
+│   ├── configregistry/   # 配置版本、发布、回滚和 Run 快照
 │   ├── structuredoutput/ # 模型结构化输出、Schema 和语义校验
 │   ├── httpapi/         # HTTP Handler 和 API 类型
 │   ├── observability/   # 日志、指标和 Trace
@@ -90,6 +93,12 @@ go run ./cmd/eino-demo
 `provider`、`model`、`prompt_version`、`schema_version` 和
 `model_config_version`，解码报告会保留这些元数据。该包当前是独立内核，尚未接入
 HTTP、模型网关或数据库持久化。
+
+配置版本注册中心位于 `internal/configregistry`，当前使用内存实现保存不可变的
+Prompt、Schema、模型路由和价格配置快照。`Publish` 与 `Activate` 分离，回滚会
+创建新的发布版本而不是修改历史版本；`BindRun` 会把 Run 固定到创建时的 active
+版本，避免新配置污染历史执行。当前不提供 HTTP 管理接口、不保存 API Key，也不
+接入数据库，后续再扩展为持久化控制面。
 
 项目提供三个 Go Fuzz 入口，用于验证请求 JSON、消息校验和 SSE 解析边界：
 
