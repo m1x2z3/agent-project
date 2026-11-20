@@ -1,0 +1,8 @@
+{"id":"normal-answer","query":"分析订单服务错误","expected_output_kind":"final_answer","expected_final_status":"answered","scenario":"normal","quality":true}
+{"id":"refused-answer","query":"分析没有证据的问题","expected_output_kind":"final_answer","expected_final_status":"refused","scenario":"normal","quality":true}
+{"id":"repair-output","query":"验证一次结构化修复","expected_output_kind":"final_answer","expected_final_status":"answered","allow_repair":true,"scenario":"repair","quality":true}
+{"id":"schema-failure","query":"验证字段类型错误","expected_output_kind":"task_analysis","expected_final_status":"answered","scenario":"schema_failure"}
+{"id":"semantic-failure","query":"验证业务语义错误","expected_output_kind":"task_analysis","expected_final_status":"answered","scenario":"semantic_failure"}
+{"id":"model-error","query":"验证模型错误分类","expected_output_kind":"final_answer","expected_final_status":"answered","simulate_model_error":true,"scenario":"model_error"}
+{"id":"context-canceled","query":"验证取消错误分类","expected_output_kind":"final_answer","expected_final_status":"answered","scenario":"canceled"}
+{"id":"candidate-failure","query":"验证候选版本门禁","expected_output_kind":"final_answer","expected_final_status":"answered","scenario":"normal","candidate_failure":true,"quality":true}
