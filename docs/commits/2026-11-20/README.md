@@ -47,7 +47,7 @@ go run ./cmd/eval
 
 主要内容：
 
-- 新增 `internal/tooling` 工具契约层。
+- 新增 `internal/tool/tooling` 工具契约层。
 - 定义工具元数据、风险等级、副作用类别、租户范围和参数 Schema。
 - 定义统一工具调用请求、结果 Envelope 和错误状态。
 - 增加 Capability Token 的租户、Run、工具版本、资源范围、过期时间和 nonce

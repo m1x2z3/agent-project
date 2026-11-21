@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第三周第 1 天：工具接口和能力模型。
+第三周第 2 天：只读工具实现。
 
 本周目标：
 
@@ -31,20 +31,26 @@
 ```text
 .
 ├── cmd/
-│   └── server/          # 服务启动入口
+│   ├── eino-demo/       # Eino 最小调用链演示
+│   ├── eval/            # 离线评测和发布演示
+│   └── server/          # HTTP 服务启动入口
 ├── internal/
-│   ├── agent/           # Agent 相关逻辑
-│   ├── configregistry/   # 配置版本、发布、回滚和 Run 快照
-│   ├── rollout/         # 灰度选择、影子发布和质量门禁
-│   ├── structuredoutput/ # 模型结构化输出、Schema 和语义校验
-│   ├── tooling/         # 工具契约、能力令牌和副作用执行边界
+│   ├── agent/           # Agent Runtime 和 Eino 编排
+│   ├── config/          # 环境变量和 .env 配置加载
+│   ├── configregistry/  # 配置版本、发布、回滚和 Run 快照
+│   ├── evaluation/      # 离线评测执行和报告
 │   ├── httpapi/         # HTTP Handler 和 API 类型
-│   ├── observability/   # 日志、指标和 Trace
-│   └── llm/             # 模型客户端封装
+│   ├── llm/             # OpenAI 兼容模型客户端和 SSE 解析
+│   ├── modelgateway/    # 供应商无关的模型路由
+│   ├── rollout/         # 灰度选择、影子运行和质量门禁
+│   ├── structuredoutput/ # 模型结构化输出、Schema 和语义校验
+│   └── tool/            # 工具契约和具体工具
+│       ├── readtools/   # 只读工具实现
+│       └── tooling/     # 公共工具契约和执行边界
 ├── docs/                # 设计和面试笔记
 ├── evals/               # 离线评测数据
-├── migrations/          # 数据库迁移
-├── testdata/            # 测试数据
+├── practice/
+│   └── algorithms/      # 独立算法练习，不属于生产业务链路
 ├── .env.example         # 本地配置示例
 └── go.mod
 ```
@@ -115,12 +121,24 @@ Runtime 只依赖 `ModelCaller` 接口，生产环境可以注入模型网关 Ro
 实现，不修改 HTTP API，也不自动激活或回滚版本。影子运行只调用模型并解析结果，
 不会执行工具、写数据库或产生外部副作用。
 
-工具基础契约位于 `internal/tooling`，定义工具元数据、调用请求、结果 Envelope、
+工具基础契约位于 `internal/tool/tooling`，定义工具元数据、调用请求、结果 Envelope、
 统一错误、Capability Token 和 Effect Boundary。`structuredoutput.ToolDecision`
 只表示模型的调用意图，不能直接触发 `Tool.Execute`；工具必须通过
-`tooling.Invoke` 完成租户、Run、版本、权限、资源范围和令牌校验。本阶段尚未
-实现具体工具、工具注册中心、RBAC、数据库、MCP 或 Agent 自动工具循环；高风险
-写工具在审批能力接入前会被边界拒绝。
+`tooling.Invoke` 完成租户、Run、版本、权限、资源范围和令牌校验。
+
+具体只读工具位于 `internal/tool/readtools`，当前提供：
+
+- `get_current_time`：根据 IANA 时区返回当前时间；
+- `search_project_docs`：在当前租户和项目资源范围内搜索研发文档。
+
+只读工具通过注入的 `ProjectDocStore` 访问数据，当前提供内存实现用于测试和演示，
+不依赖数据库、向量库或外部搜索服务。推荐使用 `readtools.InvokeWithObservation`，
+它内部仍调用 `tooling.Invoke`，并补充执行前边界拒绝的脱敏观测。工具观测只记录
+工具名称、版本、请求 ID、耗时、结果状态、错误分类和参数摘要，不记录完整参数、
+Prompt、API Key 或工具返回全文。
+
+当前仍未实现工具注册中心、RBAC、数据库、MCP、审批系统或 Agent 自动工具循环；
+高风险写工具在审批能力接入前会被边界拒绝。
 
 离线评测命令使用确定性 Fake Provider，不访问真实模型服务：
 
