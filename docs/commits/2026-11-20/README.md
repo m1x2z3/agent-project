@@ -40,3 +40,22 @@ go run ./cmd/eval
 - 显式创建 `v3` 回滚版本，记录 `PreviousVersion=v2`、
   `RollbackFrom=v1`。
 - 历史重放结果一致。
+
+## 第 3 周第 1 天：工具接口和能力模型
+
+状态：已完成开发和验证，等待确认后提交。
+
+主要内容：
+
+- 新增 `internal/tooling` 工具契约层。
+- 定义工具元数据、风险等级、副作用类别、租户范围和参数 Schema。
+- 定义统一工具调用请求、结果 Envelope 和错误状态。
+- 增加 Capability Token 的租户、Run、工具版本、资源范围、过期时间和 nonce
+  绑定校验。
+- 增加 `tooling.Invoke` 作为确定性执行边界，禁止模型 ToolDecision 直接触发工具。
+- 新增工具契约、能力令牌、跨租户、跨 Run、过期令牌、资源范围和 Context 取消测试。
+- 新增工具契约与副作用边界说明：
+  `docs/notes/工具契约与副作用边界-2026-11-20.md`。
+
+本阶段不实现具体工具、工具注册中心、HTTP、数据库、MCP、RBAC 或自动工具循环。
+本阶段暂不填写 commit hash。

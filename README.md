@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第二周第 6 天：评测与发布复盘。
+第三周第 1 天：工具接口和能力模型。
 
 本周目标：
 
@@ -24,6 +24,7 @@
 - 支持不产生副作用的影子运行和确定性发布门禁评估
 - 使用版本化 JSONL 评测集对供应商身份、结构化输出、修复、错误和稳定性进行离线评测
 - 演示发布、灰度、影子运行、质量门禁、回滚关系和历史配置重放
+- 定义工具契约、能力令牌和模型输出到工具执行之间的确定性副作用边界
 
 ## 项目结构
 
@@ -36,6 +37,7 @@
 │   ├── configregistry/   # 配置版本、发布、回滚和 Run 快照
 │   ├── rollout/         # 灰度选择、影子发布和质量门禁
 │   ├── structuredoutput/ # 模型结构化输出、Schema 和语义校验
+│   ├── tooling/         # 工具契约、能力令牌和副作用执行边界
 │   ├── httpapi/         # HTTP Handler 和 API 类型
 │   ├── observability/   # 日志、指标和 Trace
 │   └── llm/             # 模型客户端封装
@@ -112,6 +114,13 @@ Runtime 只依赖 `ModelCaller` 接口，生产环境可以注入模型网关 Ro
 确定性 Fake。灰度选择和发布门禁位于 `internal/rollout`，当前只提供本地可验证
 实现，不修改 HTTP API，也不自动激活或回滚版本。影子运行只调用模型并解析结果，
 不会执行工具、写数据库或产生外部副作用。
+
+工具基础契约位于 `internal/tooling`，定义工具元数据、调用请求、结果 Envelope、
+统一错误、Capability Token 和 Effect Boundary。`structuredoutput.ToolDecision`
+只表示模型的调用意图，不能直接触发 `Tool.Execute`；工具必须通过
+`tooling.Invoke` 完成租户、Run、版本、权限、资源范围和令牌校验。本阶段尚未
+实现具体工具、工具注册中心、RBAC、数据库、MCP 或 Agent 自动工具循环；高风险
+写工具在审批能力接入前会被边界拒绝。
 
 离线评测命令使用确定性 Fake Provider，不访问真实模型服务：
 
