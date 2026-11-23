@@ -13,6 +13,4 @@ var (
 	ErrToolVersionNotFound = errors.New("tool version is not found")
 	// ErrToolDeprecated 表示请求的工具版本已经废弃，不能作为可用工具解析。
 	ErrToolDeprecated = errors.New("tool version is deprecated")
-	// ErrInvalidCapabilityTag 表示能力标签为空或不符合查询要求。
-	ErrInvalidCapabilityTag = errors.New("capability tag is invalid")
 )

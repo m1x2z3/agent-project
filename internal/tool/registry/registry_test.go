@@ -34,7 +34,6 @@ func TestRegistryErrorsAreStableSentinels(t *testing.T) {
 		ErrToolNotFound,
 		ErrToolVersionNotFound,
 		ErrToolDeprecated,
-		ErrInvalidCapabilityTag,
 	}
 
 	for _, err := range errs {
@@ -178,6 +177,56 @@ func TestRegistryRegisterAllowsMultipleVersions(t *testing.T) {
 
 	if got := len(registry.versions["example"]); got != 2 {
 		t.Fatalf("registered versions = %d, want 2", got)
+	}
+}
+
+func TestRegistryRegisterNormalizesToolIdentity(t *testing.T) {
+	registry := NewRegistry()
+	tool := &testRegistryTool{
+		definition: testRegistryDefinition(" example ", " v1 "),
+	}
+
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	registered, err := registry.Resolve("example", "v1")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if registered.Definition.Name != "example" ||
+		registered.Definition.Version != "v1" {
+		t.Fatalf("normalized definition = %+v", registered.Definition)
+	}
+	if registered.Tool.Definition().Name != "example" ||
+		registered.Tool.Definition().Version != "v1" {
+		t.Fatalf("normalized executable definition = %+v", registered.Tool.Definition())
+	}
+
+	request := tooling.ToolExecutionRequest{
+		ToolName:    "example",
+		ToolVersion: "v1",
+		TenantID:    "tenant-a",
+		RunID:       "run-1",
+		RequestID:   "request-1",
+		Arguments:   json.RawMessage(`{}`),
+		CapabilityToken: tooling.CapabilityToken{
+			TokenID:     "cap-1",
+			TenantID:    "tenant-a",
+			RunID:       "run-1",
+			ToolName:    "example",
+			ToolVersion: "v1",
+			Permissions: []tooling.Permission{"test:read"},
+			ExpiresAt:   time.Now().Add(time.Hour),
+			Nonce:       "nonce-1",
+		},
+	}
+	result, err := tooling.Invoke(context.Background(), registered.Tool, request)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if result.ToolName != "example" || result.ToolVersion != "v1" {
+		t.Fatalf("normalized result identity = %+v", result)
 	}
 }
 

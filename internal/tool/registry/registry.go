@@ -42,10 +42,16 @@ func (r *Registry) Register(tool tooling.Tool) error {
 	if err := definition.Validate(); err != nil {
 		return ErrInvalidRegistryTool
 	}
+	normalizedDefinition := normalizeToolIdentity(definition)
+	registeredTool := tool
+	if normalizedDefinition.Name != definition.Name ||
+		normalizedDefinition.Version != definition.Version {
+		registeredTool = newCanonicalTool(tool, normalizedDefinition)
+	}
 
 	registered := RegisteredTool{
-		Definition: cloneToolDefinition(definition),
-		Tool:       tool,
+		Definition: cloneToolDefinition(normalizedDefinition),
+		Tool:       registeredTool,
 	}
 
 	r.mu.Lock()
@@ -54,15 +60,15 @@ func (r *Registry) Register(tool tooling.Tool) error {
 	if r.versions == nil {
 		r.versions = make(map[string]map[string]RegisteredTool)
 	}
-	toolVersions, exists := r.versions[definition.Name]
+	toolVersions, exists := r.versions[normalizedDefinition.Name]
 	if !exists {
 		toolVersions = make(map[string]RegisteredTool)
-		r.versions[definition.Name] = toolVersions
+		r.versions[normalizedDefinition.Name] = toolVersions
 	}
-	if _, exists := toolVersions[definition.Version]; exists {
+	if _, exists := toolVersions[normalizedDefinition.Version]; exists {
 		return ErrDuplicateTool
 	}
-	toolVersions[definition.Version] = registered
+	toolVersions[normalizedDefinition.Version] = registered
 	return nil
 }
 
