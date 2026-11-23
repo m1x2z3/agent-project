@@ -5,8 +5,24 @@ import (
 	"strings"
 	"time"
 
+	"agent-project/internal/structuredoutput"
 	"agent-project/internal/tool/tooling"
 )
+
+// ToolCallRequest 表示一次单轮工具调用所需的完整上下文。
+//
+// Decision 只表达模型是否想调用哪个工具以及调用参数；工具版本、租户、
+// Run、请求 ID 和 CapabilityToken 必须由模型之外的可信调用方提供。
+type ToolCallRequest struct {
+	Decision        structuredoutput.ToolDecision
+	ToolVersion     string
+	TenantID        string
+	RunID           string
+	RequestID       string
+	ResourceScope   []string
+	CapabilityToken tooling.CapabilityToken
+	IdempotencyKey  string
+}
 
 // Validate 检查一次工具调用请求是否具备进入执行编排的基本条件。
 //

@@ -8,6 +8,15 @@ import (
 	"agent-project/internal/tool/tooling"
 )
 
+// Executor 是单轮工具调用编排器。
+//
+// Executor 负责把结构化工具决策转换为一次受控执行；工具发现由 Registry
+// 提供，真正的参数、租户、Run、权限和能力令牌校验仍由 tooling.Invoke 完成。
+// 当前只支持一次工具调用，不负责自动循环、多工具并行、重试或降级。
+type Executor struct {
+	registry *registry.Registry
+}
+
 // NewExecutor 创建单轮工具调用编排器。
 //
 // 注册中心是执行器发现工具的必要依赖；如果没有注册中心，执行器无法安全
