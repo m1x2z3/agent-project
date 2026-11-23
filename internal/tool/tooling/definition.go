@@ -1,6 +1,26 @@
 package tooling
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+	"time"
+)
+
+// ToolDefinition 描述工具的能力、风险和执行约束。
+type ToolDefinition struct {
+	Name            string
+	Version         string
+	Description     string
+	Permission      Permission
+	RiskLevel       RiskLevel
+	EffectClass     EffectClass
+	Timeout         time.Duration
+	ParameterSchema json.RawMessage
+	TenantScope     TenantScope
+	AllowedTenants  []string
+	CapabilityTags  []string
+	Deprecated      bool
+}
 
 // Validate 检查工具定义是否满足统一契约。
 func (d ToolDefinition) Validate() error {

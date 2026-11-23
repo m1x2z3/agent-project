@@ -17,6 +17,29 @@ const (
 	ResultInternalError   ResultStatus = "internal_error"
 )
 
+// SourceRef 表示工具结果的来源位置。
+type SourceRef struct {
+	Source   string
+	Location string
+}
+
+// ToolError 是不绑定供应商协议的工具错误结构。
+type ToolError struct {
+	Code      string
+	Message   string
+	Retryable bool
+}
+
+// ToolResult 是工具返回给 Agent Runtime 的统一结果 Envelope。
+type ToolResult struct {
+	ToolName    string
+	ToolVersion string
+	Status      ResultStatus
+	Data        json.RawMessage
+	Source      []SourceRef
+	Error       *ToolError
+}
+
 // Validate 检查结果状态和错误字段是否一致。
 func (r ToolResult) Validate() error {
 	if strings.TrimSpace(r.ToolName) == "" || strings.TrimSpace(r.ToolVersion) == "" ||
