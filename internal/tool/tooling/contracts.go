@@ -43,15 +43,3 @@ const (
 	// TenantScopeCurrentTenant 表示工具只能访问当前令牌绑定的租户资源。
 	TenantScopeCurrentTenant TenantScope = "current_tenant"
 )
-
-// ResultStatus 是工具结果的稳定状态枚举。
-type ResultStatus string
-
-const (
-	ResultSuccess         ResultStatus = "success"
-	ResultInvalidArgument ResultStatus = "invalid_argument"
-	ResultNotFound        ResultStatus = "not_found"
-	ResultForbidden       ResultStatus = "forbidden"
-	ResultTimeout         ResultStatus = "timeout"
-	ResultInternalError   ResultStatus = "internal_error"
-)

@@ -5,6 +5,18 @@ import (
 	"strings"
 )
 
+// ResultStatus 是工具结果的稳定状态枚举。
+type ResultStatus string
+
+const (
+	ResultSuccess         ResultStatus = "success"
+	ResultInvalidArgument ResultStatus = "invalid_argument"
+	ResultNotFound        ResultStatus = "not_found"
+	ResultForbidden       ResultStatus = "forbidden"
+	ResultTimeout         ResultStatus = "timeout"
+	ResultInternalError   ResultStatus = "internal_error"
+)
+
 // Validate 检查结果状态和错误字段是否一致。
 func (r ToolResult) Validate() error {
 	if strings.TrimSpace(r.ToolName) == "" || strings.TrimSpace(r.ToolVersion) == "" ||
