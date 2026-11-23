@@ -2,14 +2,39 @@ package readtools
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"time"
 
 	"agent-project/internal/tool/tooling"
 )
+
+const (
+	// GetCurrentTimeName 是当前时间工具的稳定名称。
+	GetCurrentTimeName = "get_current_time"
+)
+
+var getCurrentTimeParameterSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "description": "IANA 时区，例如 Asia/Shanghai"
+    }
+  },
+  "required": ["timezone"],
+  "additionalProperties": false
+}`)
+
+// GetCurrentTimeParameterSchema 返回当前时间工具的参数 Schema 副本。
+//
+// 返回副本而不是共享可变切片，避免调用方修改 Schema 后影响后续工具定义。
+func GetCurrentTimeParameterSchema() json.RawMessage {
+	cloned := make(json.RawMessage, len(getCurrentTimeParameterSchema))
+	copy(cloned, getCurrentTimeParameterSchema)
+	return cloned
+}
 
 // CurrentTimeTool 返回指定 IANA 时区的当前时间。
 //
@@ -61,7 +86,11 @@ func (t *CurrentTimeTool) Execute(
 		ToolVersion: ReadToolVersion,
 	}
 	defer func() {
-		observeTool(t.observer, start, request, result, returnErr)
+		observer := t.observer
+		if isObservationSuppressed(ctx) {
+			observer = NoopObserver{}
+		}
+		observeTool(observer, start, request, result, returnErr)
 	}()
 
 	if err := ctx.Err(); err != nil {
@@ -120,11 +149,6 @@ type currentTimeResult struct {
 	CurrentTime   string `json:"current_time"`
 	Timezone      string `json:"timezone"`
 	UnixTimestamp int64  `json:"unix_timestamp"`
-}
-
-func digestArguments(arguments []byte) string {
-	sum := sha256.Sum256(arguments)
-	return hex.EncodeToString(sum[:])
 }
 
 var _ tooling.Tool = (*CurrentTimeTool)(nil)

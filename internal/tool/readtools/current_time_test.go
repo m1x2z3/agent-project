@@ -93,32 +93,3 @@ func TestCurrentTimeToolDefinitionIsStable(t *testing.T) {
 		t.Fatalf("definition rejected: %v", err)
 	}
 }
-
-type recordingObserver struct {
-	items []ToolObservation
-}
-
-func (o *recordingObserver) Observe(observation ToolObservation) {
-	o.items = append(o.items, observation)
-}
-
-func currentTimeRequest(arguments string) tooling.ToolExecutionRequest {
-	return tooling.ToolExecutionRequest{
-		ToolName:    GetCurrentTimeName,
-		ToolVersion: ReadToolVersion,
-		TenantID:    "tenant-a",
-		RunID:       "run-1",
-		RequestID:   "req-1",
-		Arguments:   json.RawMessage(arguments),
-		CapabilityToken: tooling.CapabilityToken{
-			TokenID:     "token-1",
-			TenantID:    "tenant-a",
-			RunID:       "run-1",
-			ToolName:    GetCurrentTimeName,
-			ToolVersion: ReadToolVersion,
-			Permissions: []tooling.Permission{"time:read"},
-			ExpiresAt:   time.Now().Add(time.Hour),
-			Nonce:       "nonce-1",
-		},
-	}
-}

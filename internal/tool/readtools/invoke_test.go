@@ -2,8 +2,10 @@ package readtools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"agent-project/internal/tool/tooling"
 )
@@ -69,6 +71,25 @@ func TestInvokeWithObservationDoesNotDuplicateToolObservation(t *testing.T) {
 	}
 }
 
+func TestInvokeWithObservationRecordsSuccessfulToolWithOwnObserverDisabled(t *testing.T) {
+	observer := &recordingObserver{}
+	tool := NewCurrentTimeTool(nil, nil)
+
+	_, err := InvokeWithObservation(
+		context.Background(),
+		tool,
+		currentTimeRequest(`{"timezone":"UTC"}`),
+		observer,
+	)
+	if err != nil {
+		t.Fatalf("InvokeWithObservation() error = %v", err)
+	}
+	if len(observer.items) != 1 ||
+		observer.items[0].ResultStatus != tooling.ResultSuccess {
+		t.Fatalf("unexpected success observation: %+v", observer.items)
+	}
+}
+
 func TestInvokeWithObservationRecordsCanceledContext(t *testing.T) {
 	observer := &recordingObserver{}
 	tool := NewCurrentTimeTool(nil, nil)
@@ -89,4 +110,51 @@ func TestInvokeWithObservationRecordsCanceledContext(t *testing.T) {
 		observer.items[0].ErrorCode != "canceled" {
 		t.Fatalf("unexpected cancellation observation: %+v", observer.items)
 	}
+}
+
+func TestInvokeWithObservationRecordsResultValidationFailure(t *testing.T) {
+	observer := &recordingObserver{}
+	tool := invalidResultTool{}
+
+	_, err := InvokeWithObservation(
+		context.Background(),
+		&tool,
+		currentTimeRequest(`{"timezone":"UTC"}`),
+		observer,
+	)
+	if !errors.Is(err, tooling.ErrResultInvalid) {
+		t.Fatalf("InvokeWithObservation() error = %v, want ErrResultInvalid", err)
+	}
+	if len(observer.items) != 1 {
+		t.Fatalf("observation count = %d, want 1", len(observer.items))
+	}
+	if observer.items[0].ResultStatus != tooling.ResultInternalError ||
+		observer.items[0].ErrorCode != "execution_failed" {
+		t.Fatalf("unexpected result validation observation: %+v", observer.items[0])
+	}
+}
+
+type invalidResultTool struct{}
+
+func (invalidResultTool) Definition() tooling.ToolDefinition {
+	return tooling.ToolDefinition{
+		Name:            GetCurrentTimeName,
+		Version:         ReadToolVersion,
+		Description:     "测试结果校验失败",
+		Permission:      tooling.Permission("time:read"),
+		RiskLevel:       tooling.RiskLow,
+		EffectClass:     tooling.EffectRead,
+		Timeout:         time.Second,
+		ParameterSchema: GetCurrentTimeParameterSchema(),
+		TenantScope:     tooling.TenantScopeGlobal,
+	}
+}
+
+func (invalidResultTool) Execute(context.Context, tooling.ToolExecutionRequest) (tooling.ToolResult, error) {
+	return tooling.ToolResult{
+		ToolName:    GetCurrentTimeName,
+		ToolVersion: ReadToolVersion,
+		Status:      tooling.ResultSuccess,
+		Data:        json.RawMessage(`not-json`),
+	}, nil
 }

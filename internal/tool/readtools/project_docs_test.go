@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
-	"time"
 
 	"agent-project/internal/tool/tooling"
 )
@@ -230,36 +229,4 @@ type errorProjectDocStore struct {
 
 func (s errorProjectDocStore) Search(context.Context, string, string, string, int) ([]DocumentHit, error) {
 	return nil, s.err
-}
-
-type cancelingProjectDocStore struct {
-	cancel context.CancelFunc
-}
-
-func (s cancelingProjectDocStore) Search(ctx context.Context, _ string, _ string, _ string, _ int) ([]DocumentHit, error) {
-	s.cancel()
-	return nil, ctx.Err()
-}
-
-func projectDocsRequest(arguments string) tooling.ToolExecutionRequest {
-	return tooling.ToolExecutionRequest{
-		ToolName:      SearchProjectDocsName,
-		ToolVersion:   ReadToolVersion,
-		TenantID:      "tenant-a",
-		RunID:         "run-1",
-		RequestID:     "req-docs-1",
-		Arguments:     json.RawMessage(arguments),
-		ResourceScope: []string{"project:project-a"},
-		CapabilityToken: tooling.CapabilityToken{
-			TokenID:       "token-docs-1",
-			TenantID:      "tenant-a",
-			RunID:         "run-1",
-			ToolName:      SearchProjectDocsName,
-			ToolVersion:   ReadToolVersion,
-			ResourceScope: []string{"project:project-a"},
-			Permissions:   []tooling.Permission{"project_docs:read"},
-			ExpiresAt:     time.Now().Add(time.Hour),
-			Nonce:         "nonce-docs-1",
-		},
-	}
 }

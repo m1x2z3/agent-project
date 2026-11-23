@@ -10,6 +10,39 @@ import (
 	"agent-project/internal/tool/tooling"
 )
 
+const (
+	// SearchProjectDocsName 是项目文档搜索工具的稳定名称。
+	SearchProjectDocsName = "search_project_docs"
+)
+
+var searchProjectDocsParameterSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20
+    }
+  },
+  "required": ["project_id", "query", "limit"],
+  "additionalProperties": false
+}`)
+
+// SearchProjectDocsParameterSchema 返回文档搜索工具的参数 Schema 副本。
+func SearchProjectDocsParameterSchema() json.RawMessage {
+	cloned := make(json.RawMessage, len(searchProjectDocsParameterSchema))
+	copy(cloned, searchProjectDocsParameterSchema)
+	return cloned
+}
+
 // SearchProjectDocsTool 在当前租户范围内搜索项目文档。
 //
 // 工具只依赖 ProjectDocStore，不直接依赖数据库、向量库或 HTTP 服务；
@@ -57,7 +90,11 @@ func (t *SearchProjectDocsTool) Execute(
 		ToolVersion: ReadToolVersion,
 	}
 	defer func() {
-		observeTool(t.observer, start, request, result, returnErr)
+		observer := t.observer
+		if isObservationSuppressed(ctx) {
+			observer = NoopObserver{}
+		}
+		observeTool(observer, start, request, result, returnErr)
 	}()
 
 	if err := ctx.Err(); err != nil {
@@ -105,7 +142,9 @@ func (t *SearchProjectDocsTool) Execute(
 		return result, nil
 	}
 
-	hits, err := t.store.Search(ctx, request.TenantID, projectID, query, arguments.Limit)
+	executionCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	hits, err := t.store.Search(executionCtx, request.TenantID, projectID, query, arguments.Limit)
 	if err != nil {
 		switch {
 		case errors.Is(err, context.Canceled):
@@ -137,7 +176,7 @@ func (t *SearchProjectDocsTool) Execute(
 			return result, nil
 		}
 	}
-	if err := ctx.Err(); err != nil {
+	if err := executionCtx.Err(); err != nil {
 		return tooling.ToolResult{}, err
 	}
 

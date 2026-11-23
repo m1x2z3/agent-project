@@ -90,7 +90,15 @@ func Invoke(ctx context.Context, tool Tool, request ToolExecutionRequest) (ToolR
 		return ToolResult{}, err
 	}
 
-	result, err := tool.Execute(ctx, request)
+	// Timeout 是工具契约的一部分，由统一执行边界负责转成 Context
+	// 取消信号。具体工具仍需把这个 Context 继续传递给底层数据源。
+	executionCtx, cancel := context.WithTimeout(ctx, definition.Timeout)
+	defer cancel()
+	if err := executionCtx.Err(); err != nil {
+		return ToolResult{}, err
+	}
+
+	result, err := tool.Execute(executionCtx, request)
 	if err != nil {
 		return result, err
 	}

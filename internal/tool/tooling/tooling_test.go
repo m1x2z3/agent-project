@@ -199,6 +199,20 @@ func TestInvokeStopsWhenContextAlreadyCanceled(t *testing.T) {
 	}
 }
 
+func TestInvokeEnforcesToolTimeout(t *testing.T) {
+	definition := testDefinition()
+	definition.Timeout = 10 * time.Millisecond
+	tool := &blockingTool{definition: definition}
+
+	_, err := Invoke(context.Background(), tool, testRequest())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Invoke() error = %v, want context deadline exceeded", err)
+	}
+	if !tool.started {
+		t.Fatal("tool was not started")
+	}
+}
+
 func TestToolDecisionCannotCreateAuthorizedRequest(t *testing.T) {
 	// ToolDecision 只有模型意图字段，没有 CapabilityToken；
 	// 即使工具名和参数正确，缺少令牌也不能通过执行边界。
@@ -229,6 +243,21 @@ func TestToolingErrorsDoNotEchoSensitiveInputs(t *testing.T) {
 type fakeTool struct {
 	definition ToolDefinition
 	calls      *atomic.Int32
+}
+
+type blockingTool struct {
+	definition ToolDefinition
+	started    bool
+}
+
+func (t *blockingTool) Definition() ToolDefinition {
+	return t.definition
+}
+
+func (t *blockingTool) Execute(ctx context.Context, _ ToolExecutionRequest) (ToolResult, error) {
+	t.started = true
+	<-ctx.Done()
+	return ToolResult{}, ctx.Err()
 }
 
 func (t *fakeTool) Definition() ToolDefinition {

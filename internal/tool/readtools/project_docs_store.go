@@ -6,6 +6,32 @@ import (
 	"strings"
 )
 
+// DocumentHit 是文档数据源返回的一条脱敏检索结果。
+//
+// 工具只返回定位信息和摘要，不把完整文档内容放入统一工具结果，
+// 这样可以控制上下文大小，也避免观测层意外记录完整文档。
+type DocumentHit struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Summary  string `json:"summary"`
+	Source   string `json:"source"`
+	Location string `json:"location"`
+}
+
+// ProjectDocStore 是项目文档的只读数据源抽象。
+//
+// 具体实现可以是内存数据源、PostgreSQL/pgvector 适配器或后续的搜索服务，
+// 工具本身不关心底层存储，只通过 tenantID 保持租户查询边界。
+type ProjectDocStore interface {
+	Search(
+		context.Context,
+		string,
+		string,
+		string,
+		int,
+	) ([]DocumentHit, error)
+}
+
 // ProjectDocument 是内存文档数据源使用的租户和项目归属信息。
 type ProjectDocument struct {
 	TenantID  string
