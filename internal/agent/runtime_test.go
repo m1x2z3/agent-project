@@ -58,10 +58,69 @@ func TestRuntimeRunsVersionedChainAndObservesMetadata(t *testing.T) {
 		!strings.Contains(model.requests[1].Messages[0].Content, "定位订单服务错误") {
 		t.Fatalf("unexpected model requests: %+v", model.requests)
 	}
+	if model.requests[0].Model != "fake-task_analysis" ||
+		model.requests[1].Model != "fake-final_answer" ||
+		model.requests[0].Temperature == nil ||
+		*model.requests[0].Temperature != 0 ||
+		model.requests[0].MaxTokens != nil ||
+		model.requests[0].Timeout != time.Second {
+		t.Fatalf("route options were not propagated: %+v", model.requests)
+	}
 	if len(observer.items) != 1 || !observer.items[0].Success ||
 		observer.items[0].TotalTokens != 6 ||
 		observer.items[0].Cost <= 0 {
 		t.Fatalf("unexpected observation: %+v", observer.items)
+	}
+}
+
+func TestRuntimeUsesProviderAndModelForCostLookup(t *testing.T) {
+	registry := configregistry.NewRegistry()
+	snapshot := runtimeSnapshot("v1", "analysis {{.Query}}", "final")
+	snapshot.Pricing = map[string]configregistry.PricingVersion{
+		"same-model-deepseek": {
+			Provider: "deepseek", Model: "same-model", Version: "price.v1",
+			Currency: "USD", InputPer1K: 1, OutputPer1K: 2,
+		},
+		"same-model-kimi": {
+			Provider: "kimi", Model: "same-model", Version: "price.v1",
+			Currency: "USD", InputPer1K: 10, OutputPer1K: 20,
+		},
+	}
+	snapshot.Routes["task_analysis"] = configregistry.ModelRouteVersion{
+		Task: "task_analysis", Version: "route.analysis.v1",
+		Provider: "deepseek", Model: "same-model", Timeout: time.Second,
+	}
+	snapshot.Routes["final_answer"] = configregistry.ModelRouteVersion{
+		Task: "final_answer", Version: "route.final.v1",
+		Provider: "kimi", Model: "same-model", Timeout: time.Second,
+	}
+	if err := registry.Publish(snapshot); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if err := registry.Activate("v1"); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	selector, err := rollout.NewSelector(registry, rollout.RolloutPolicy{
+		CandidateVersion: "v1", Percentage: 100,
+	})
+	if err != nil {
+		t.Fatalf("NewSelector() error = %v", err)
+	}
+	observer := &recordingObserver{}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Registry: registry, Selector: selector, Model: &fakeRuntimeModel{},
+		Observer: observer,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	if _, err := runtime.Run(context.Background(), RunInput{
+		RequestID: "req-cost", RunID: "run-cost", Query: "问题",
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(observer.items) != 1 || observer.items[0].Cost <= 0.02 {
+		t.Fatalf("unexpected cost observation: %+v", observer.items)
 	}
 }
 
@@ -313,9 +372,17 @@ func (m *fakeRuntimeModel) Chat(ctx context.Context, request modelgateway.ChatRe
 	if request.Task == "task_analysis" && m.analysisContent != "" {
 		content = m.analysisContent
 	}
+	provider := request.Provider
+	if provider == "" {
+		provider = "fake"
+	}
+	model := request.Model
+	if model == "" {
+		model = "fake-" + request.Task
+	}
 	return modelgateway.ChatResponse{
-		Provider: "fake",
-		Model:    "fake-" + request.Task,
+		Provider: provider,
+		Model:    model,
 		Message:  modelgateway.Message{Role: "assistant", Content: content},
 		Usage:    &modelgateway.Usage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 3},
 	}, nil

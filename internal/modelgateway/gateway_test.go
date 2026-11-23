@@ -59,6 +59,42 @@ func TestOpenAICompatibleProviderChat(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleProviderAppliesPerRequestOptions(t *testing.T) {
+	provider, err := NewOpenAICompatibleProvider(validProviderConfig("deepseek", "https://deepseek.example/v1"), nil)
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+	}
+	client := &recordingLLMClient{
+		response: llm.ChatResponse{
+			Model: "route-model",
+			Choices: []llm.Choice{{
+				Message:      llm.Message{Role: "assistant", Content: "answer"},
+				FinishReason: "stop",
+			}},
+		},
+	}
+	provider.client = client
+	temperature := 0.7
+	maxTokens := 256
+
+	_, err = provider.Chat(context.Background(), ChatRequest{
+		Task:        "analysis",
+		Model:       "route-model",
+		Temperature: &temperature,
+		MaxTokens:   &maxTokens,
+		Timeout:     time.Second,
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if client.options.Model != "route-model" ||
+		client.options.Temperature == nil || *client.options.Temperature != temperature ||
+		client.options.MaxTokens == nil || *client.options.MaxTokens != maxTokens {
+		t.Fatalf("options = %+v, want per-request route options", client.options)
+	}
+}
+
 func TestOpenAICompatibleProviderConvertsAPIErrorWithoutRawMessage(t *testing.T) {
 	provider, err := NewOpenAICompatibleProvider(validProviderConfig("kimi", "https://kimi.example/v1"), nil)
 	if err != nil {
@@ -224,6 +260,20 @@ type fakeLLMClient struct {
 func (f *fakeLLMClient) Chat(_ context.Context, messages []llm.Message) (llm.ChatResponse, error) {
 	f.messages = append([]llm.Message(nil), messages...)
 	return f.response, f.err
+}
+
+func (f *fakeLLMClient) ChatWithOptions(ctx context.Context, messages []llm.Message, _ llm.ChatOptions) (llm.ChatResponse, error) {
+	return f.Chat(ctx, messages)
+}
+
+type recordingLLMClient struct {
+	response llm.ChatResponse
+	options  llm.ChatOptions
+}
+
+func (c *recordingLLMClient) ChatWithOptions(_ context.Context, _ []llm.Message, options llm.ChatOptions) (llm.ChatResponse, error) {
+	c.options = options
+	return c.response, nil
 }
 
 func (f *fakeProvider) Name() string {

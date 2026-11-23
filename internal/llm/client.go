@@ -107,6 +107,15 @@ type Client struct {
 	logger      *slog.Logger
 }
 
+// ChatOptions 是单次模型调用的可选覆盖参数。
+//
+// 空值表示沿用 Client 创建时的默认配置，便于旧的 /chat 调用保持原有行为。
+type ChatOptions struct {
+	Model       string
+	Temperature *float64
+	MaxTokens   *int
+}
+
 // NewClient 根据配置创建模型客户端。
 //
 // logger 为 nil 时使用 slog.Default；模型请求超时时间由 cfg.LLMTimeout 控制。
@@ -137,14 +146,33 @@ func NewClient(cfg config.Config, logger *slog.Logger) *Client {
 // ctx 控制请求生命周期，messages 不能为空。网络错误、上下文取消、上游非 2xx
 // 响应和无效响应体都会通过 error 返回。
 func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, error) {
+	return c.ChatWithOptions(ctx, messages, ChatOptions{})
+}
+
+// ChatWithOptions 使用单次调用参数发送非流式请求。
+//
+// 客户端级配置仍然是默认值；调用方只有显式提供覆盖参数时，才会替换对应字段。
+func (c *Client) ChatWithOptions(ctx context.Context, messages []Message, options ChatOptions) (ChatResponse, error) {
 	// 先做本地校验，避免无效请求消耗网络和模型额度。
 	if err := ctx.Err(); err != nil {
 		return ChatResponse{}, fmt.Errorf("llm chat canceled before request: %w", err)
 	}
+	modelName := c.model
+	if strings.TrimSpace(options.Model) != "" {
+		modelName = strings.TrimSpace(options.Model)
+	}
+	temperature := c.temperature
+	if options.Temperature != nil {
+		temperature = *options.Temperature
+	}
+	maxTokens := c.maxTokens
+	if options.MaxTokens != nil {
+		maxTokens = *options.MaxTokens
+	}
 	if c.apiKey == "" {
 		return ChatResponse{}, ErrMissingAPIKey
 	}
-	if c.model == "" {
+	if modelName == "" {
 		return ChatResponse{}, ErrMissingModel
 	}
 	if len(messages) == 0 {
@@ -152,10 +180,10 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	}
 
 	requestBody := chatRequest{
-		Model:       c.model,
+		Model:       modelName,
 		Messages:    messages,
-		Temperature: c.temperature,
-		MaxTokens:   c.maxTokens,
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
 	}
 	body, err := json.Marshal(requestBody)
 	if err != nil {
@@ -175,14 +203,14 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (ChatResponse, er
 	c.logger.InfoContext(ctx, "llm request",
 		"method", http.MethodPost,
 		"endpoint", sanitizeEndpoint(request.URL),
-		"model", c.model,
+		"model", modelName,
 		"message_count", len(messages),
 	)
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		c.logger.ErrorContext(ctx, "llm request failed",
-			"model", c.model,
+			"model", modelName,
 			"duration_ms", durationMilliseconds(time.Since(startedAt)),
 			"error_type", requestErrorType(err),
 		)

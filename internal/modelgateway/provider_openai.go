@@ -21,7 +21,7 @@ type OpenAICompatibleProvider struct {
 //
 // 它隔离具体的 llm.Client，便于在不访问真实模型服务的情况下测试该 Provider。
 type openAICompatibleClient interface {
-	Chat(context.Context, []llm.Message) (llm.ChatResponse, error)
+	ChatWithOptions(context.Context, []llm.Message, llm.ChatOptions) (llm.ChatResponse, error)
 }
 
 // NewOpenAICompatibleProvider 创建一个 OpenAI 兼容供应商适配器。
@@ -70,7 +70,17 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, request ChatRequest
 	for i, message := range request.Messages {
 		messages[i] = llm.Message{Role: message.Role, Content: message.Content}
 	}
-	response, err := p.client.Chat(ctx, messages)
+	callCtx := ctx
+	var cancel context.CancelFunc
+	if request.Timeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, request.Timeout)
+		defer cancel()
+	}
+	response, err := p.client.ChatWithOptions(callCtx, messages, llm.ChatOptions{
+		Model:       request.Model,
+		Temperature: request.Temperature,
+		MaxTokens:   request.MaxTokens,
+	})
 	if err != nil {
 		return ChatResponse{}, classifyProviderError(p.Name(), err)
 	}
@@ -104,6 +114,15 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, request ChatRequest
 }
 
 func validateChatRequest(request ChatRequest) error {
+	if request.Temperature != nil && (*request.Temperature < 0 || *request.Temperature > 2) {
+		return &Error{Kind: ErrorInvalidRequest}
+	}
+	if request.MaxTokens != nil && *request.MaxTokens < 0 {
+		return &Error{Kind: ErrorInvalidRequest}
+	}
+	if request.Timeout < 0 {
+		return &Error{Kind: ErrorInvalidRequest}
+	}
 	if len(request.Messages) == 0 {
 		return &Error{Kind: ErrorInvalidRequest}
 	}

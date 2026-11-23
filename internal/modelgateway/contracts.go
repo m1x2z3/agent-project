@@ -1,6 +1,9 @@
 package modelgateway
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Message 是模型网关使用的供应商无关消息结构。
 //
@@ -12,9 +15,13 @@ type Message struct {
 
 // ChatRequest 表示一次模型调用请求。
 type ChatRequest struct {
-	Task     string
-	Provider string
-	Messages []Message
+	Task        string
+	Provider    string
+	Model       string
+	Temperature *float64
+	MaxTokens   *int
+	Timeout     time.Duration
+	Messages    []Message
 }
 
 // Usage 表示一次模型调用的 Token 用量。

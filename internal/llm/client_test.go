@@ -77,6 +77,50 @@ func TestClientChat(t *testing.T) {
 	}
 }
 
+func TestClientChatWithOptionsOverridesDefaults(t *testing.T) {
+	var received chatRequest
+	client := NewClient(config.Config{
+		LLMBaseURL:     "https://example.test/v1",
+		LLMAPIKey:      "test-key",
+		LLMModel:       "default-model",
+		LLMTemperature: 0.2,
+		LLMMaxTokens:   64,
+	}, nil)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{
+					"model":"route-model",
+					"choices":[{"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}]
+				}`)),
+				Request: r,
+			}, nil
+		}),
+	}
+	temperature := 0.8
+	maxTokens := 256
+	_, err := client.ChatWithOptions(context.Background(), []Message{
+		{Role: RoleUser, Content: "hi"},
+	}, ChatOptions{
+		Model:       "route-model",
+		Temperature: &temperature,
+		MaxTokens:   &maxTokens,
+	})
+	if err != nil {
+		t.Fatalf("ChatWithOptions() error = %v", err)
+	}
+	if received.Model != "route-model" ||
+		received.Temperature != temperature ||
+		received.MaxTokens != maxTokens {
+		t.Fatalf("request = %+v, want per-call overrides", received)
+	}
+}
+
 func TestClientChatReturnsAPIError(t *testing.T) {
 	var logs bytes.Buffer
 	client := NewClient(config.Config{
