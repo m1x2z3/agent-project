@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第三周第 3 天：工具注册中心与能力发现。
+第三周第 4 天：单轮工具调用编排。
 
 本周目标：
 
@@ -47,6 +47,7 @@
 │   └── tool/            # 工具契约、具体工具和注册中心
 │       ├── readtools/   # 只读工具实现
 │       ├── registry/    # 工具名称、版本和能力发现
+│       ├── runner/      # 单轮工具调用编排
 │       └── tooling/     # 公共工具契约和执行边界
 ├── docs/                # 设计和面试笔记
 ├── evals/               # 离线评测数据
@@ -145,6 +146,13 @@ Prompt、API Key 或工具返回全文。
 Capability Token 校验。已废弃版本会保留在全部列表中，但不会进入默认可用列表，
 也不能通过 `Resolve` 作为可用工具返回。返回的定义使用深拷贝，避免调用方修改
 切片或 Schema 后污染注册中心内部状态。
+
+单轮工具调用编排位于 `internal/tool/runner`。`runner.Executor` 接收模型的
+`structuredoutput.ToolDecision` 和外部注入的工具版本、租户、Run、资源范围及
+Capability Token，依次完成请求校验、`Registry.Resolve`、参数 JSON 编码和
+`tooling.Invoke`。只有通过 `tooling.Invoke` 的参数 Schema、权限、资源范围和
+副作用边界后，才会调用具体工具。当前只支持一次工具调用，不接入
+`internal/agent/runtime.go`，也不实现自动循环、多工具并行、MCP、RBAC 或审批服务。
 
 当前仍未实现 RBAC、数据库、MCP、审批系统或 Agent 自动工具循环；高风险写工具
 在审批能力接入前会被边界拒绝。注册中心当前是进程内实现，后续可以在不改变工具

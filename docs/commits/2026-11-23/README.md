@@ -29,3 +29,28 @@
 go test ./internal/tool/registry
 go test -race ./internal/tool/registry
 ```
+
+## 第三周第 4 天：单轮工具调用编排
+
+状态：已完成开发和验证，等待确认后提交。
+
+本阶段暂不填写 commit hash。
+
+主要内容：
+
+- 新增 `internal/tool/runner` 单轮工具调用编排包。
+- 新增 `ToolCallRequest`，区分模型调用意图和外部可信执行上下文。
+- 新增请求前置校验，检查请求 ID、租户、Run、显式工具版本、
+  Capability Token 和资源范围。
+- 新增 `Executor`，串联 `ToolCallRequest`、`Registry.Resolve`、
+  `tooling.Invoke` 和具体 `Tool.Execute`。
+- 参数通过标准库 JSON 编码后，仍由 `tooling.Invoke` 执行最终 Schema、
+  权限、租户、资源范围和副作用边界校验。
+- 增加真实只读工具的跨包执行测试，覆盖 `get_current_time`、
+  `search_project_docs` 和租户隔离。
+- 增加 Context 取消、工具错误、参数 Schema、高风险写操作和废弃版本测试。
+- 增加单轮工具调用编排边界说明：
+  `docs/notes/单轮工具调用编排边界-2026-11-23.md`。
+
+本阶段不接入 HTTP、Agent Runtime、MCP、数据库、RBAC、审批系统、自动工具循环、
+多工具并行、自动重试或自动降级。
