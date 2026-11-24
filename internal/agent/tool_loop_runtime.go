@@ -154,20 +154,30 @@ func (r *ToolLoopRuntime) Run(
 
 	// 每个阶段失败时保留当前 state 中的 execution，确保已经开始的 Run
 	// 仍能记录最终错误状态；各阶段内部返回的零值 state 不会丢失观测上下文。
+	// 工具循环先完成任务分析，后续工具决策和最终回答都基于这个结果。
+	// 阶段函数返回更新后的 state，因此需要重新赋值保存新增的中间状态。
 	state, err = r.runAnalysis(ctx, state)
 	if err != nil {
+		// 任一阶段失败都立即停止，统一记录失败观测，避免继续使用不完整状态。
 		return r.failToolLoop(execution, err)
 	}
+	// 将用户问题、分析结果和工具历史渲染为下一次模型调用的 Prompt。
 	state, err = r.renderToolDecisionPrompt(ctx, state)
 	if err != nil {
+		// Prompt 渲染失败时不能继续调用模型，统一收口错误和观测。
 		return r.failToolLoop(execution, err)
 	}
+	// 调用模型获取工具调用意图；此时只是产生决策，还没有执行任何工具。
 	state, err = r.callToolDecisionModel(ctx, state)
 	if err != nil {
+		// 模型调用失败时立即结束本次 Run，不伪造工具决策。
 		return r.failToolLoop(execution, err)
 	}
+	// 对模型输出执行 JSON、Schema 和业务语义校验，得到可信的 ToolDecision。
+	// 修复逻辑由结构化输出内核控制，最多执行一次。
 	state, err = r.decodeToolDecision(ctx, state)
 	if err != nil {
+		// 决策无法通过校验时不能进入工具执行阶段，统一记录并返回错误。
 		return r.failToolLoop(execution, err)
 	}
 
