@@ -18,6 +18,10 @@ var (
 )
 
 // RolloutPolicy 描述一个候选配置版本的本地灰度规则。
+//
+// 灰度不是一次性让所有请求切换到新版本，而是让一部分请求先使用
+// CandidateVersion，其余请求继续使用当前 active 版本。Percentage 控制
+// 百分比分流，TenantAllowlist 中的租户则始终命中候选版本。
 type RolloutPolicy struct {
 	CandidateVersion string
 	Percentage       uint8
@@ -39,12 +43,22 @@ type SelectionDecision struct {
 }
 
 // Selector 根据注册中心中的 active 版本和候选版本执行本地灰度选择。
+//
+// 它不是发布或激活配置的组件，而是一个版本分流器：
+//
+//	active 版本 + 候选版本 + 白名单 + 灰度比例
+//	    -> 决定本次请求使用的配置版本
+//
+// 选择结果通过稳定哈希计算，保证相同租户或请求在重复选择时保持一致。
 type Selector struct {
 	registry *configregistry.Registry
 	policy   RolloutPolicy
 }
 
 // NewSelector 创建一个不修改注册中心状态的灰度选择器。
+//
+// 创建时会校验候选版本已经发布，但不会激活候选版本，也不会立即为
+// 某个请求做选择。真正的版本选择由 Select 完成。
 func NewSelector(registry *configregistry.Registry, policy RolloutPolicy) (*Selector, error) {
 	// 候选版本必须先存在于 Registry，避免选择器创建成功后才发现配置不存在。
 	if registry == nil || strings.TrimSpace(policy.CandidateVersion) == "" || policy.Percentage > 100 {
@@ -68,6 +82,16 @@ func (s *Selector) Policy() RolloutPolicy {
 }
 
 // Select 根据租户白名单或稳定哈希选择本次请求使用的配置版本。
+//
+// 灰度选择顺序如下：
+//
+//  1. 白名单租户始终使用候选版本；
+//  2. 其他请求优先使用 TenantID，没有租户时使用 RequestID；
+//  3. 根据稳定哈希得到 0~99 的流量桶；
+//  4. Bucket < Percentage 时使用候选版本，否则使用当前 active 版本。
+//
+// 例如 Percentage=10 时，桶值 0~9 的请求进入候选版本，其他请求继续
+// 使用 active 版本。由于分桶键稳定，同一租户或请求的结果可以重复复现。
 func (s *Selector) Select(input SelectionInput) (SelectionDecision, error) {
 	if s == nil || s.registry == nil {
 		return SelectionDecision{}, ErrInvalidPolicy
