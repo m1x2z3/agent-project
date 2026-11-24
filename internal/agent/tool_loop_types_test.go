@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,7 +201,7 @@ func TestToolLoopRunExecutesToolThenProducesFinalAnswer(t *testing.T) {
 		definition: toolLoopExecutionDefinition(),
 		result: tooling.ToolResult{
 			Status: tooling.ResultSuccess,
-			Data:   json.RawMessage(`{"hits":[{"id":"doc-1"}]}`),
+			Data:   json.RawMessage(`{"hits":[{"id":"doc-1","secret":"tool-secret"}]}`),
 		},
 	}
 	toolRegistry := registry.NewToolRegistry()
@@ -267,6 +269,14 @@ func TestToolLoopRunExecutesToolThenProducesFinalAnswer(t *testing.T) {
 	if tool.executeCalls != 1 {
 		t.Fatalf("tool execute calls = %d, want 1", tool.executeCalls)
 	}
+	// 工具实例只能收到 Executor 和 tooling.Invoke 校验后的执行请求，
+	// 不能直接接收模型原始输出；这里确认可信授权字段已经被注入。
+	if tool.lastRequest.TenantID != "tenant-a" ||
+		tool.lastRequest.RunID != "run-integration" ||
+		tool.lastRequest.RequestID != "request-integration" ||
+		tool.lastRequest.CapabilityToken.ToolVersion != "v1" {
+		t.Fatalf("unexpected tool execution request: %+v", tool.lastRequest)
+	}
 	if len(model.requests) != 4 ||
 		model.requests[0].Task != analysisTask ||
 		model.requests[1].Task != toolDecisionTask ||
@@ -276,6 +286,15 @@ func TestToolLoopRunExecutesToolThenProducesFinalAnswer(t *testing.T) {
 	}
 	if !strings.Contains(model.requests[2].Messages[0].Content, "doc-1") {
 		t.Fatalf("next decision prompt omitted tool result: %s", model.requests[2].Messages[0].Content)
+	}
+	// 最终输出只保留工具调用摘要，不应暴露完整参数或工具返回全文。
+	outputJSON, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("Marshal(output) error = %v", err)
+	}
+	if strings.Contains(string(outputJSON), "error") ||
+		strings.Contains(string(outputJSON), "tool-secret") {
+		t.Fatalf("final output exposed sensitive tool data: %s", outputJSON)
 	}
 	if len(observer.items) != 1 || !observer.items[0].Success ||
 		observer.items[0].TotalTokens != 12 {
@@ -336,6 +355,115 @@ func TestToolLoopRunStopsOnContextCancellationBeforeModelCall(t *testing.T) {
 	}
 }
 
+func TestToolLoopRunStopsWhenContextCanceledAfterAnalysis(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	model := &toolLoopCancelAfterAnalysisModel{cancel: cancel}
+	runtime := newToolLoopFailureRuntime(t, model, nil, &recordingObserver{}, func(
+		context.Context,
+		RunInput,
+		structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		t.Fatal("authorizer was called after context cancellation")
+		return runner.ToolCallRequest{}, nil
+	})
+
+	_, err := runtime.Run(ctx, toolLoopRunInput("run-cancel-after-analysis"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(model.requests) != 1 || model.requests[0].Task != analysisTask {
+		t.Fatalf("model requests = %+v, want analysis only", model.requests)
+	}
+}
+
+func TestToolLoopRunStopsWhenContextCanceledDuringToolExecution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tool := &blockingToolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		started:    make(chan struct{}),
+	}
+	model := &toolLoopSequenceModel{
+		decisions: []string{
+			`{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"error"}}`,
+		},
+	}
+	observer := &recordingObserver{}
+	runtime := newToolLoopFailureRuntime(t, model, tool, observer, func(
+		_ context.Context,
+		input RunInput,
+		decision structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		return validToolLoopCallRequest(input, decision), nil
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, runErr := runtime.Run(ctx, toolLoopRunInput("run-cancel-during-tool"))
+		errCh <- runErr
+	}()
+
+	select {
+	case <-tool.started:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("tool execution did not start")
+	}
+
+	err := <-errCh
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(observer.items) != 1 || observer.items[0].Success ||
+		observer.items[0].ErrorKind != "canceled" {
+		t.Fatalf("unexpected cancellation observation: %+v", observer.items)
+	}
+}
+
+func TestToolLoopRuntimeSupportsConcurrentRuns(t *testing.T) {
+	model := &fakeRuntimeModel{}
+	observer := &recordingObserver{}
+	runtime := newToolLoopFailureRuntime(t, model, nil, observer, func(
+		context.Context,
+		RunInput,
+		structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		t.Fatal("authorizer was called for should_call=false")
+		return runner.ToolCallRequest{}, nil
+	})
+
+	const runCount = 8
+	errCh := make(chan error, runCount)
+	var waitGroup sync.WaitGroup
+	for index := 0; index < runCount; index++ {
+		index := index
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			input := toolLoopRunInput(fmt.Sprintf("run-concurrent-%d", index))
+			output, err := runtime.Run(context.Background(), input)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if output.RunID != input.RunID ||
+				output.RequestID != input.RequestID ||
+				output.ReleaseVersion != "v1" ||
+				output.FinalAnswer.Status != structuredoutput.FinalAnswerStatusAnswered {
+				errCh <- fmt.Errorf("unexpected concurrent output: %+v", output)
+			}
+		}()
+	}
+	waitGroup.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	if len(observer.items) != runCount {
+		t.Fatalf("observation count = %d, want %d", len(observer.items), runCount)
+	}
+}
+
 func TestToolLoopRunObservesModelFailure(t *testing.T) {
 	configStore := configregistry.NewRegistry()
 	if err := configStore.Publish(toolLoopSnapshot("v1")); err != nil {
@@ -388,6 +516,318 @@ func TestToolLoopRunObservesModelFailure(t *testing.T) {
 		observer.items[0].Success ||
 		observer.items[0].ErrorKind != "analysis_model_error" {
 		t.Fatalf("unexpected failure observation: %+v", observer.items)
+	}
+}
+
+func TestToolLoopRunStopsOnToolDecisionDecodeFailure(t *testing.T) {
+	model := &toolLoopFailureModel{
+		decisionContent: `{"should_call":true}`,
+	}
+	observer := &recordingObserver{}
+	authorizerCalls := 0
+	runtime := newToolLoopFailureRuntime(t, model, nil, observer, func(
+		context.Context,
+		RunInput,
+		structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		authorizerCalls++
+		return runner.ToolCallRequest{}, nil
+	})
+
+	_, err := runtime.Run(context.Background(), toolLoopRunInput("run-decision-decode"))
+	if !errors.Is(err, ErrToolDecisionDecodeFailed) {
+		t.Fatalf("Run() error = %v, want ErrToolDecisionDecodeFailed", err)
+	}
+	if authorizerCalls != 0 {
+		t.Fatalf("authorizer calls = %d, want 0", authorizerCalls)
+	}
+	if len(model.requests) != 2 {
+		t.Fatalf("model requests = %d, want analysis and decision calls", len(model.requests))
+	}
+	assertSingleToolLoopFailureObservation(t, observer, "tool_decision_decode_error")
+}
+
+func TestToolLoopRunStopsOnAuthorizationFailure(t *testing.T) {
+	expected := errors.New("authorization unavailable")
+	model := &toolLoopFailureModel{
+		decisionContent: `{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"error"}}`,
+	}
+	observer := &recordingObserver{}
+	authorizerCalls := 0
+	runtime := newToolLoopFailureRuntime(t, model, mustToolLoopTestTool(t), observer, func(
+		context.Context,
+		RunInput,
+		structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		authorizerCalls++
+		return runner.ToolCallRequest{}, expected
+	})
+
+	_, err := runtime.Run(context.Background(), toolLoopRunInput("run-authorize"))
+	if !errors.Is(err, ErrToolAuthorizationFailed) || !errors.Is(err, expected) {
+		t.Fatalf("Run() error = %v, want authorization error and cause", err)
+	}
+	if authorizerCalls != 1 {
+		t.Fatalf("authorizer calls = %d, want 1", authorizerCalls)
+	}
+	if len(model.requests) != 2 {
+		t.Fatalf("model requests = %d, want analysis and decision calls", len(model.requests))
+	}
+	assertSingleToolLoopFailureObservation(t, observer, "tool_authorization_error")
+}
+
+func TestToolLoopRunStopsOnToolResolutionFailure(t *testing.T) {
+	model := &toolLoopFailureModel{
+		decisionContent: `{"should_call":true,"tool_name":"missing_tool","arguments":{"query":"error"}}`,
+	}
+	observer := &recordingObserver{}
+	toolCalls := 0
+	runtime := newToolLoopFailureRuntime(t, model, nil, observer, func(
+		_ context.Context,
+		input RunInput,
+		decision structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		return validToolLoopCallRequest(input, decision), nil
+	})
+
+	_, err := runtime.Run(context.Background(), toolLoopRunInput("run-tool-not-found"))
+	if !errors.Is(err, ErrToolExecutionFailed) || !errors.Is(err, registry.ErrToolNotFound) {
+		t.Fatalf("Run() error = %v, want tool execution and not-found errors", err)
+	}
+	if toolCalls != 0 {
+		t.Fatalf("tool calls = %d, want 0", toolCalls)
+	}
+	if len(model.requests) != 2 {
+		t.Fatalf("model requests = %d, want analysis and decision calls", len(model.requests))
+	}
+	assertSingleToolLoopFailureObservation(t, observer, "tool_execution_error")
+}
+
+func TestToolLoopRunStopsOnFinalAnswerDecodeFailure(t *testing.T) {
+	model := &toolLoopFailureModel{
+		decisionContent: `{"should_call":false}`,
+		finalContent:    `{"status":"answered"}`,
+	}
+	observer := &recordingObserver{}
+	runtime := newToolLoopFailureRuntime(t, model, nil, observer, func(
+		context.Context,
+		RunInput,
+		structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		return runner.ToolCallRequest{}, nil
+	})
+
+	_, err := runtime.Run(context.Background(), toolLoopRunInput("run-final-decode"))
+	if !errors.Is(err, ErrFinalDecodeFailed) {
+		t.Fatalf("Run() error = %v, want ErrFinalDecodeFailed", err)
+	}
+	if len(model.requests) != 3 {
+		t.Fatalf("model requests = %d, want analysis, decision and final calls", len(model.requests))
+	}
+	assertSingleToolLoopFailureObservation(t, observer, "final_decode_error")
+}
+
+func TestToolLoopRunSkipsToolWhenDecisionDoesNotCall(t *testing.T) {
+	model := &toolLoopSequenceModel{
+		decisions: []string{`{"should_call":false}`},
+	}
+	tool := &toolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		result: tooling.ToolResult{
+			Status: tooling.ResultSuccess,
+			Data:   json.RawMessage(`{"hits":[]}`),
+		},
+	}
+	observer := &recordingObserver{}
+	authorizerCalls := 0
+	runtime := newToolLoopFailureRuntime(t, model, tool, observer, func(
+		context.Context,
+		RunInput,
+		structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		authorizerCalls++
+		return runner.ToolCallRequest{}, nil
+	})
+
+	output, err := runtime.Run(context.Background(), toolLoopRunInput("run-no-tool"))
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if tool.executeCalls != 0 {
+		t.Fatalf("tool execute calls = %d, want 0", tool.executeCalls)
+	}
+	if authorizerCalls != 0 {
+		t.Fatalf("authorizer calls = %d, want 0", authorizerCalls)
+	}
+	if len(output.ToolCalls) != 0 || output.ToolDecisionRounds != 1 {
+		t.Fatalf("output tool state = %+v", output)
+	}
+	if len(observer.items) != 1 || !observer.items[0].Success {
+		t.Fatalf("unexpected success observation: %+v", observer.items)
+	}
+	if len(model.requests) != 3 ||
+		model.requests[0].Task != analysisTask ||
+		model.requests[1].Task != toolDecisionTask ||
+		model.requests[2].Task != finalTask {
+		t.Fatalf("model request tasks = %+v", model.requests)
+	}
+}
+
+func TestToolLoopRunRejectsDuplicateToolCall(t *testing.T) {
+	model := &toolLoopSequenceModel{
+		decisions: []string{
+			`{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"error"}}`,
+			`{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"error"}}`,
+		},
+	}
+	tool := &toolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		result: tooling.ToolResult{
+			Status: tooling.ResultSuccess,
+			Data:   json.RawMessage(`{"hits":[]}`),
+		},
+	}
+	observer := &recordingObserver{}
+	runtime := newToolLoopFailureRuntime(t, model, tool, observer, func(
+		_ context.Context,
+		input RunInput,
+		decision structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		return validToolLoopCallRequest(input, decision), nil
+	})
+
+	_, err := runtime.Run(context.Background(), toolLoopRunInput("run-duplicate"))
+	if !errors.Is(err, ErrDuplicateToolCall) {
+		t.Fatalf("Run() error = %v, want ErrDuplicateToolCall", err)
+	}
+	if tool.executeCalls != 1 {
+		t.Fatalf("tool execute calls = %d, want 1", tool.executeCalls)
+	}
+	if len(model.requests) != 3 {
+		t.Fatalf("model requests = %d, want analysis and two decision calls", len(model.requests))
+	}
+	assertSingleToolLoopFailureObservation(t, observer, "duplicate_tool_call")
+}
+
+func TestToolLoopRunStopsAtMaximumToolCalls(t *testing.T) {
+	model := &toolLoopSequenceModel{
+		decisions: []string{
+			`{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"first"}}`,
+			`{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"second"}}`,
+		},
+	}
+	tool := &toolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		result: tooling.ToolResult{
+			Status: tooling.ResultSuccess,
+			Data:   json.RawMessage(`{"hits":[]}`),
+		},
+	}
+	observer := &recordingObserver{}
+	runtime := newToolLoopFailureRuntime(t, model, tool, observer, func(
+		_ context.Context,
+		input RunInput,
+		decision structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		return validToolLoopCallRequest(input, decision), nil
+	})
+	runtime.maxCalls = 1
+
+	_, err := runtime.Run(context.Background(), toolLoopRunInput("run-max-calls"))
+	if !errors.Is(err, ErrMaxToolCallsExceeded) {
+		t.Fatalf("Run() error = %v, want ErrMaxToolCallsExceeded", err)
+	}
+	if tool.executeCalls != 1 {
+		t.Fatalf("tool execute calls = %d, want 1", tool.executeCalls)
+	}
+	if len(model.requests) != 3 {
+		t.Fatalf("model requests = %d, want analysis and two decision calls", len(model.requests))
+	}
+	assertSingleToolLoopFailureObservation(t, observer, "max_tool_calls_exceeded")
+}
+
+func TestToolLoopRedactsSensitiveDataFromOutputAndObservation(t *testing.T) {
+	const (
+		apiKey        = "sk-test-sensitive-key"
+		promptSecret  = "prompt-secret-content"
+		modelSecret   = "model-secret-content"
+		toolSecret    = "tool-secret-content"
+		argumentValue = "argument-secret-content"
+	)
+	model := &toolLoopSequenceModel{
+		decisions: []string{
+			`{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"` + argumentValue + `"}}`,
+			`{"should_call":false}`,
+		},
+	}
+	tool := &toolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		result: tooling.ToolResult{
+			Status: tooling.ResultSuccess,
+			Data:   json.RawMessage(`{"answer":"` + toolSecret + `"}`),
+		},
+	}
+	observer := &recordingObserver{}
+	runtime := newToolLoopFailureRuntime(t, model, tool, observer, func(
+		_ context.Context,
+		input RunInput,
+		decision structuredoutput.ToolDecision,
+	) (runner.ToolCallRequest, error) {
+		return validToolLoopCallRequest(input, decision), nil
+	})
+
+	output, err := runtime.Run(context.Background(), RunInput{
+		RequestID: "request-redaction",
+		TenantID:  "tenant-a",
+		RunID:     "run-redaction",
+		Query:     promptSecret,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	outputText, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("Marshal(output) error = %v", err)
+	}
+	observerText := fmt.Sprintf("%+v", observer.items)
+	for _, sensitive := range []string{apiKey, promptSecret, modelSecret, toolSecret, argumentValue} {
+		if strings.Contains(string(outputText), sensitive) {
+			t.Fatalf("output exposed sensitive value %q: %s", sensitive, outputText)
+		}
+		if strings.Contains(observerText, sensitive) {
+			t.Fatalf("observation exposed sensitive value %q: %s", sensitive, observerText)
+		}
+	}
+	if len(output.ToolCalls) != 1 ||
+		!strings.HasPrefix(output.ToolCalls[0].ArgumentsDigest, "sha256:") ||
+		strings.Contains(output.ToolCalls[0].ArgumentsDigest, argumentValue) {
+		t.Fatalf("tool call summary is not redacted: %+v", output.ToolCalls)
+	}
+
+	failureObserver := &recordingObserver{}
+	failureModel := &toolLoopFailureModel{
+		err: errors.New("provider error api_key=" + apiKey + " prompt=" + promptSecret),
+	}
+	failureRuntime := newToolLoopFailureRuntime(
+		t,
+		failureModel,
+		nil,
+		failureObserver,
+		func(context.Context, RunInput, structuredoutput.ToolDecision) (runner.ToolCallRequest, error) {
+			return runner.ToolCallRequest{}, nil
+		},
+	)
+	_, err = failureRuntime.Run(context.Background(), toolLoopRunInput("run-redaction-error"))
+	if err == nil {
+		t.Fatal("Run() error = nil, want model failure")
+	}
+	if strings.Contains(err.Error(), apiKey) || strings.Contains(err.Error(), promptSecret) {
+		t.Fatalf("error exposed sensitive model details: %v", err)
+	}
+	if len(failureObserver.items) != 1 ||
+		strings.Contains(fmt.Sprintf("%+v", failureObserver.items[0]), apiKey) ||
+		strings.Contains(fmt.Sprintf("%+v", failureObserver.items[0]), promptSecret) {
+		t.Fatalf("failure observation exposed sensitive data: %+v", failureObserver.items)
 	}
 }
 
@@ -1412,14 +1852,19 @@ type toolLoopTestTool struct {
 	definition   tooling.ToolDefinition
 	result       tooling.ToolResult
 	executeCalls int
+	lastRequest  tooling.ToolExecutionRequest
 }
 
 func (t *toolLoopTestTool) Definition() tooling.ToolDefinition {
 	return t.definition
 }
 
-func (t *toolLoopTestTool) Execute(context.Context, tooling.ToolExecutionRequest) (tooling.ToolResult, error) {
+func (t *toolLoopTestTool) Execute(
+	_ context.Context,
+	request tooling.ToolExecutionRequest,
+) (tooling.ToolResult, error) {
 	t.executeCalls++
+	t.lastRequest = request
 	result := t.result
 	result.ToolName = t.definition.Name
 	result.ToolVersion = t.definition.Version
@@ -1462,6 +1907,221 @@ func (m *toolLoopIntegrationModel) Chat(
 		Message:  modelgateway.Message{Role: "assistant", Content: content},
 		Usage:    &modelgateway.Usage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 3},
 	}, nil
+}
+
+type toolLoopFailureModel struct {
+	requests        []modelgateway.ChatRequest
+	decisionContent string
+	finalContent    string
+	err             error
+}
+
+func (m *toolLoopFailureModel) Chat(
+	ctx context.Context,
+	request modelgateway.ChatRequest,
+) (modelgateway.ChatResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return modelgateway.ChatResponse{}, err
+	}
+	m.requests = append(m.requests, request)
+	if m.err != nil {
+		return modelgateway.ChatResponse{}, m.err
+	}
+	content := `{"summary":"需要查询项目文档","confidence":0.9}`
+	switch request.Task {
+	case toolDecisionTask:
+		content = m.decisionContent
+	case finalTask:
+		content = m.finalContent
+		if content == "" {
+			content = `{"status":"answered","answer":"已完成"}`
+		}
+	}
+	return modelgateway.ChatResponse{
+		Provider: request.Provider,
+		Model:    request.Model,
+		Message:  modelgateway.Message{Role: "assistant", Content: content},
+	}, nil
+}
+
+type toolLoopSequenceModel struct {
+	requests  []modelgateway.ChatRequest
+	decisions []string
+	index     int
+}
+
+func (m *toolLoopSequenceModel) Chat(
+	ctx context.Context,
+	request modelgateway.ChatRequest,
+) (modelgateway.ChatResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return modelgateway.ChatResponse{}, err
+	}
+	m.requests = append(m.requests, request)
+	content := `{"summary":"需要查询项目文档","confidence":0.9}`
+	switch request.Task {
+	case toolDecisionTask:
+		if m.index < len(m.decisions) {
+			content = m.decisions[m.index]
+			m.index++
+		} else {
+			content = `{"should_call":false}`
+		}
+	case finalTask:
+		content = `{"status":"answered","answer":"已完成"}`
+	}
+	return modelgateway.ChatResponse{
+		Provider: request.Provider,
+		Model:    request.Model,
+		Message:  modelgateway.Message{Role: "assistant", Content: content},
+	}, nil
+}
+
+type toolLoopCancelAfterAnalysisModel struct {
+	cancel   context.CancelFunc
+	requests []modelgateway.ChatRequest
+}
+
+func (m *toolLoopCancelAfterAnalysisModel) Chat(
+	ctx context.Context,
+	request modelgateway.ChatRequest,
+) (modelgateway.ChatResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return modelgateway.ChatResponse{}, err
+	}
+	m.requests = append(m.requests, request)
+	if request.Task == analysisTask {
+		m.cancel()
+	}
+	return modelgateway.ChatResponse{
+		Provider: request.Provider,
+		Model:    request.Model,
+		Message: modelgateway.Message{
+			Role:    "assistant",
+			Content: `{"summary":"需要查询项目文档","confidence":0.9}`,
+		},
+	}, nil
+}
+
+type blockingToolLoopTestTool struct {
+	definition tooling.ToolDefinition
+	started    chan struct{}
+}
+
+func (t *blockingToolLoopTestTool) Definition() tooling.ToolDefinition {
+	return t.definition
+}
+
+func (t *blockingToolLoopTestTool) Execute(
+	ctx context.Context,
+	_ tooling.ToolExecutionRequest,
+) (tooling.ToolResult, error) {
+	close(t.started)
+	<-ctx.Done()
+	return tooling.ToolResult{}, ctx.Err()
+}
+
+func newToolLoopFailureRuntime(
+	t *testing.T,
+	model ModelCaller,
+	tool tooling.Tool,
+	observer *recordingObserver,
+	authorizer ToolCallAuthorizer,
+) *ToolLoopRuntime {
+	t.Helper()
+	configStore := configregistry.NewRegistry()
+	if err := configStore.Publish(toolLoopSnapshot("v1")); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if err := configStore.Activate("v1"); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	selector, err := rollout.NewSelector(configStore, rollout.RolloutPolicy{
+		CandidateVersion: "v1",
+		Percentage:       100,
+	})
+	if err != nil {
+		t.Fatalf("NewSelector() error = %v", err)
+	}
+	toolRegistry := registry.NewToolRegistry()
+	if tool != nil {
+		if err := toolRegistry.Register(tool); err != nil {
+			t.Fatalf("Register() error = %v", err)
+		}
+	}
+	executor, err := runner.NewExecutor(toolRegistry)
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	runtime, err := NewToolLoopRuntime(ToolLoopConfig{
+		Registry:   configStore,
+		Selector:   selector,
+		Model:      model,
+		Executor:   executor,
+		Authorizer: authorizer,
+		Observer:   observer,
+	})
+	if err != nil {
+		t.Fatalf("NewToolLoopRuntime() error = %v", err)
+	}
+	return runtime
+}
+
+func toolLoopRunInput(runID string) RunInput {
+	return RunInput{
+		RequestID: "request-" + runID,
+		TenantID:  "tenant-a",
+		RunID:     runID,
+		Query:     "查询订单服务文档",
+	}
+}
+
+func validToolLoopCallRequest(
+	input RunInput,
+	decision structuredoutput.ToolDecision,
+) runner.ToolCallRequest {
+	return runner.ToolCallRequest{
+		Decision:    decision,
+		ToolVersion: "v1",
+		TenantID:    input.TenantID,
+		RunID:       input.RunID,
+		RequestID:   input.RequestID,
+		CapabilityToken: tooling.CapabilityToken{
+			TokenID:     "cap-" + input.RunID,
+			TenantID:    input.TenantID,
+			RunID:       input.RunID,
+			ToolName:    decision.ToolName,
+			ToolVersion: "v1",
+			Permissions: []tooling.Permission{"tool:read"},
+			ExpiresAt:   time.Now().Add(time.Hour),
+			Nonce:       "nonce-" + input.RunID,
+		},
+	}
+}
+
+func mustToolLoopTestTool(t *testing.T) tooling.Tool {
+	t.Helper()
+	return &toolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		result: tooling.ToolResult{
+			Status: tooling.ResultSuccess,
+			Data:   json.RawMessage(`{"hits":[]}`),
+		},
+	}
+}
+
+func assertSingleToolLoopFailureObservation(
+	t *testing.T,
+	observer *recordingObserver,
+	errorKind string,
+) {
+	t.Helper()
+	if len(observer.items) != 1 {
+		t.Fatalf("observation count = %d, want 1: %+v", len(observer.items), observer.items)
+	}
+	if observer.items[0].Success || observer.items[0].ErrorKind != errorKind {
+		t.Fatalf("failure observation = %+v, want error kind %q", observer.items[0], errorKind)
+	}
 }
 
 func TestDigestToolArgumentsIsStableAndRedacted(t *testing.T) {
