@@ -12,7 +12,9 @@ import (
 //
 // Executor 负责把结构化工具决策转换为一次受控执行；工具发现由 Registry
 // 提供，真正的参数、租户、Run、权限和能力令牌校验仍由 tooling.Invoke 完成。
-// 当前只支持一次工具调用，不负责自动循环、多工具并行、重试或降级。
+// 当前只支持一次工具调用，不负责自动循环、多工具并行、重试或降级，
+// 也不负责调用最终回答模型；最终回答由上层 Agent Runtime 使用 ModelCaller
+// 独立完成。
 type Executor struct {
 	registry *registry.Registry
 }

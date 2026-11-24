@@ -369,6 +369,9 @@ func (m *fakeRuntimeModel) Chat(ctx context.Context, request modelgateway.ChatRe
 	if request.Task == "final_answer" {
 		content = `{"status":"answered","answer":"已定位"}`
 	}
+	if request.Task == "tool_decision" {
+		content = `{"should_call":false}`
+	}
 	if request.Task == "task_analysis" && m.analysisContent != "" {
 		content = m.analysisContent
 	}

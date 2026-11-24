@@ -95,7 +95,7 @@ func (r *Runtime) callAnalysisModel(ctx context.Context, state runtimeState) (ru
 	if err != nil {
 		return runtimeState{}, err
 	}
-	r.recordRoute(state.execution, route)
+	recordRoute(state.execution, route)
 	// Runtime 只依赖 ModelCaller，不感知 DeepSeek、Kimi 或 OpenAI 兼容协议。
 	// 供应商选择和底层 HTTP 细节由 modelgateway 负责。
 	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
@@ -111,7 +111,7 @@ func (r *Runtime) callAnalysisModel(ctx context.Context, state runtimeState) (ru
 		return runtimeState{}, runtimeFailure("analysis_model", fmt.Errorf("%w: %w", ErrAnalysisModelFailed, err))
 	}
 	state.analysisResponse = response
-	r.recordModelResponse(state.execution, state.snapshot, response, analysisTask)
+	recordModelResponse(state.execution, state.snapshot, response, analysisTask)
 	return state, nil
 }
 
@@ -167,7 +167,7 @@ func (r *Runtime) callFinalModel(ctx context.Context, state runtimeState) (runti
 	if err != nil {
 		return runtimeState{}, err
 	}
-	r.recordRoute(state.execution, route)
+	recordRoute(state.execution, route)
 	// 这是第二次、面向最终回答的模型调用；仍然通过统一 ModelCaller 执行。
 	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
 		Task:        finalTask,
@@ -182,7 +182,7 @@ func (r *Runtime) callFinalModel(ctx context.Context, state runtimeState) (runti
 		return runtimeState{}, runtimeFailure("final_model", fmt.Errorf("%w: %w", ErrFinalModelFailed, err))
 	}
 	state.finalResponse = response
-	r.recordModelResponse(state.execution, state.snapshot, response, finalTask)
+	recordModelResponse(state.execution, state.snapshot, response, finalTask)
 	return state, nil
 }
 

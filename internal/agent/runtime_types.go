@@ -13,10 +13,14 @@ import (
 )
 
 const (
-	analysisPromptName = "task_analysis"
-	finalPromptName    = "final_answer"
-	analysisTask       = "task_analysis"
-	finalTask          = "final_answer"
+	// 这些名称同时作为配置快照中的 Prompt、Schema 和模型路由键。
+	// 工具循环必须使用同一组稳定键，才能从绑定版本读取完整配置。
+	analysisPromptName     = "task_analysis"
+	toolDecisionPromptName = "tool_decision"
+	finalPromptName        = "final_answer"
+	analysisTask           = "task_analysis"
+	toolDecisionTask       = "tool_decision"
+	finalTask              = "final_answer"
 )
 
 // RunInput 是一次 Agent Runtime 执行所需的业务输入。

@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第三周第 4 天：单轮工具调用编排。
+第三周第 5 天：受控多轮工具循环。
 
 本周目标：
 
@@ -151,8 +151,22 @@ Capability Token 校验。已废弃版本会保留在全部列表中，但不会
 `structuredoutput.ToolDecision` 和外部注入的工具版本、租户、Run、资源范围及
 Capability Token，依次完成请求校验、`Registry.Resolve`、参数 JSON 编码和
 `tooling.Invoke`。只有通过 `tooling.Invoke` 的参数 Schema、权限、资源范围和
-副作用边界后，才会调用具体工具。当前只支持一次工具调用，不接入
-`internal/agent/runtime.go`，也不实现自动循环、多工具并行、MCP、RBAC 或审批服务。
+副作用边界后，才会调用具体工具。`runner.Executor` 仍然只负责一次工具执行，
+不负责自动循环或最终回答模型。
+
+受控多轮工具循环位于 `internal/agent/tool_loop_runtime.go`。`ToolLoopRuntime`
+负责串联任务分析、工具决策、可信授权、重复调用检查、最大调用次数限制、
+`runner.Executor`、工具结果回传和最终回答。每轮模型输出都必须先经过
+`structuredoutput.DecodeToolDecision`，模型只能表达调用意图，工具版本、
+租户、Run、资源范围和 Capability Token 由 `ToolCallAuthorizer` 注入。工具
+执行仍必须经过 `Registry.Resolve -> tooling.Invoke -> Tool.Execute`，不会因为
+进入多轮循环而绕过安全边界。
+
+工具循环使用独立的 `ToolLoopOutput`，只向上层返回工具名称、版本、状态、错误
+分类和参数摘要，不返回完整工具参数或工具结果原文。循环最多执行默认 3 次工具
+调用，并拒绝相同工具、版本和参数摘要的重复调用。失败路径统一记录脱敏观测，
+成功和失败每个 Run 只提交一次观测。当前工具循环仍未接入 HTTP、MCP、数据库、
+RBAC、审批系统、自动重试或自动降级。
 
 当前仍未实现 RBAC、数据库、MCP、审批系统或 Agent 自动工具循环；高风险写工具
 在审批能力接入前会被边界拒绝。注册中心当前是进程内实现，后续可以在不改变工具

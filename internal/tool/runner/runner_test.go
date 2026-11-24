@@ -511,7 +511,8 @@ func TestExecutorExecuteUsesEffectBoundary(t *testing.T) {
 }
 
 func TestExecutorExecuteRunsRegisteredReadTool(t *testing.T) {
-	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	// 使用相对当前时间的 Token，避免测试在日期变化后误判为过期。
+	now := time.Now().UTC()
 	tool := readtools.NewCurrentTimeTool(func() time.Time { return now }, nil)
 	toolRegistry := registry.NewRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
