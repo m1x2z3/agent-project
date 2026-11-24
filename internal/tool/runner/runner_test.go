@@ -52,7 +52,7 @@ func TestToolCallRequestStoresDecisionAndExecutionContext(t *testing.T) {
 }
 
 func TestExecutorStoresRegistryDependency(t *testing.T) {
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	executor := Executor{registry: toolRegistry}
 
 	if executor.registry != toolRegistry {
@@ -67,7 +67,7 @@ func TestNewExecutorRequiresRegistry(t *testing.T) {
 }
 
 func TestNewExecutorCreatesConfiguredExecutor(t *testing.T) {
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	executor, err := NewExecutor(toolRegistry)
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
@@ -220,7 +220,7 @@ func validToolCallRequest(expiresAt time.Time) ToolCallRequest {
 }
 
 func TestExecutorResolvesToolFromRequest(t *testing.T) {
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	tool := &runnerTestTool{definition: runnerTestDefinition()}
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -246,7 +246,7 @@ func TestExecutorResolvesToolFromRequest(t *testing.T) {
 }
 
 func TestExecutorResolveToolRejectsUnknownToolAndVersion(t *testing.T) {
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(&runnerTestTool{definition: runnerTestDefinition()}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -272,7 +272,7 @@ func TestExecutorResolveToolRejectsUnknownToolAndVersion(t *testing.T) {
 
 func TestExecutorResolveToolDoesNotExecuteTool(t *testing.T) {
 	tool := &runnerTestTool{definition: runnerTestDefinition()}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -329,7 +329,7 @@ func TestBuildExecutionRequestRejectsUnencodableArguments(t *testing.T) {
 
 func TestExecutorExecuteInvokesResolvedTool(t *testing.T) {
 	tool := &runnerTestTool{definition: runnerTestDefinition()}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -359,7 +359,7 @@ func TestExecutorExecuteInvokesResolvedTool(t *testing.T) {
 
 func TestExecutorExecuteRejectsRequestBeforeToolExecution(t *testing.T) {
 	tool := &runnerTestTool{definition: runnerTestDefinition()}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -382,7 +382,7 @@ func TestExecutorExecuteRejectsRequestBeforeToolExecution(t *testing.T) {
 
 func TestExecutorExecuteStopsWhenContextIsCanceled(t *testing.T) {
 	tool := &runnerTestTool{definition: runnerTestDefinition()}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -405,7 +405,7 @@ func TestExecutorExecuteStopsWhenContextIsCanceled(t *testing.T) {
 }
 
 func TestExecutorExecuteChecksContextBeforeResolvingTool(t *testing.T) {
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(&runnerTestTool{definition: runnerTestDefinition()}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -433,7 +433,7 @@ func TestExecutorExecutePropagatesToolError(t *testing.T) {
 		definition: runnerTestDefinition(),
 		executeErr: toolError,
 	}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -459,7 +459,7 @@ func TestExecutorExecutePropagatesToolError(t *testing.T) {
 
 func TestExecutorExecuteUsesToolingSchemaBoundary(t *testing.T) {
 	tool := &runnerTestTool{definition: runnerTestDefinition()}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -488,7 +488,7 @@ func TestExecutorExecuteUsesEffectBoundary(t *testing.T) {
 	definition.RiskLevel = tooling.RiskHigh
 	definition.EffectClass = tooling.EffectNonRetryableWrite
 	tool := &runnerTestTool{definition: definition}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -514,7 +514,7 @@ func TestExecutorExecuteRunsRegisteredReadTool(t *testing.T) {
 	// 使用相对当前时间的 Token，避免测试在日期变化后误判为过期。
 	now := time.Now().UTC()
 	tool := readtools.NewCurrentTimeTool(func() time.Time { return now }, nil)
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -578,7 +578,7 @@ func TestExecutorExecuteRunsProjectDocsToolWithTenantScope(t *testing.T) {
 		},
 	})
 	tool := readtools.NewSearchProjectDocsTool(store, nil)
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -638,7 +638,7 @@ func TestExecutorDoesNotExecuteDeprecatedToolVersion(t *testing.T) {
 	definition := runnerTestDefinition()
 	definition.Deprecated = true
 	tool := &runnerTestTool{definition: definition}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}

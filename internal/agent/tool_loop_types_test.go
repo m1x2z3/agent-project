@@ -202,7 +202,7 @@ func TestToolLoopRunExecutesToolThenProducesFinalAnswer(t *testing.T) {
 			Data:   json.RawMessage(`{"hits":[{"id":"doc-1"}]}`),
 		},
 	}
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -298,7 +298,7 @@ func TestToolLoopRunStopsOnContextCancellationBeforeModelCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -351,7 +351,7 @@ func TestToolLoopRunObservesModelFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -410,7 +410,7 @@ func TestNewToolLoopRuntimeAppliesDefaultMaxToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -504,7 +504,7 @@ func TestToolLoopSelectAndBindSnapshotUsesSelectedRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -560,7 +560,7 @@ func TestToolLoopSelectAndBindSnapshotStopsWhenContextIsCanceled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -611,7 +611,7 @@ func TestToolLoopRunAnalysisReusesBoundSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -673,7 +673,7 @@ func TestToolLoopCallAndDecodeToolDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -775,7 +775,7 @@ func TestToolLoopDecodeToolDecisionUsesRepairOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -833,7 +833,7 @@ func TestToolLoopAuthorizeToolDecisionBuildsValidatedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -1352,7 +1352,7 @@ func TestToolLoopExecuteToolStopsAtMaximumWithoutCallingExecutor(t *testing.T) {
 
 func newToolLoopTestExecutor(t *testing.T, tool tooling.Tool) *runner.Executor {
 	t.Helper()
-	toolRegistry := registry.NewRegistry()
+	toolRegistry := registry.NewToolRegistry()
 	if err := toolRegistry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -1532,7 +1532,7 @@ func TestToolLoopRenderToolDecisionPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelector() error = %v", err)
 	}
-	executor, err := runner.NewExecutor(registry.NewRegistry())
+	executor, err := runner.NewExecutor(registry.NewToolRegistry())
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}

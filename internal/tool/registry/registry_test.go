@@ -15,9 +15,9 @@ import (
 )
 
 func TestNewRegistryInitializesEmptyRegistry(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	if registry == nil {
-		t.Fatal("NewRegistry() returned nil")
+		t.Fatal("NewToolRegistry() returned nil")
 	}
 	if registry.versions == nil {
 		t.Fatal("registry versions map is nil")
@@ -111,7 +111,7 @@ func TestCloneToolDefinitionPreservesNilSlices(t *testing.T) {
 }
 
 func TestRegistryRegisterValidTool(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	tool := &testRegistryTool{
 		definition: testRegistryDefinition("example", "v1"),
 	}
@@ -144,7 +144,7 @@ func TestRegistryRegisterRejectsInvalidTools(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			registry := NewRegistry()
+			registry := NewToolRegistry()
 			if err := registry.Register(test.tool); err != ErrInvalidRegistryTool {
 				t.Fatalf("Register() error = %v, want ErrInvalidRegistryTool", err)
 			}
@@ -153,7 +153,7 @@ func TestRegistryRegisterRejectsInvalidTools(t *testing.T) {
 }
 
 func TestRegistryRegisterRejectsDuplicateVersion(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	first := &testRegistryTool{definition: testRegistryDefinition("example", "v1")}
 	second := &testRegistryTool{definition: testRegistryDefinition("example", "v1")}
 
@@ -166,7 +166,7 @@ func TestRegistryRegisterRejectsDuplicateVersion(t *testing.T) {
 }
 
 func TestRegistryRegisterAllowsMultipleVersions(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	for _, version := range []string{"v1", "v2"} {
 		if err := registry.Register(&testRegistryTool{
 			definition: testRegistryDefinition("example", version),
@@ -181,7 +181,7 @@ func TestRegistryRegisterAllowsMultipleVersions(t *testing.T) {
 }
 
 func TestRegistryRegisterNormalizesToolIdentity(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	tool := &testRegistryTool{
 		definition: testRegistryDefinition(" example ", " v1 "),
 	}
@@ -231,7 +231,7 @@ func TestRegistryRegisterNormalizesToolIdentity(t *testing.T) {
 }
 
 func TestRegistryResolveReturnsRegisteredTool(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	tool := &testRegistryTool{
 		definition: testRegistryDefinition("example", "v1"),
 	}
@@ -253,7 +253,7 @@ func TestRegistryResolveReturnsRegisteredTool(t *testing.T) {
 }
 
 func TestRegistryResolveDistinguishesMissingToolAndVersion(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	if err := registry.Register(&testRegistryTool{
 		definition: testRegistryDefinition("example", "v1"),
 	}); err != nil {
@@ -269,7 +269,7 @@ func TestRegistryResolveDistinguishesMissingToolAndVersion(t *testing.T) {
 }
 
 func TestRegistryResolveRejectsDeprecatedVersion(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definition := testRegistryDefinition("example", "v1")
 	definition.Deprecated = true
 	if err := registry.Register(&testRegistryTool{definition: definition}); err != nil {
@@ -282,7 +282,7 @@ func TestRegistryResolveRejectsDeprecatedVersion(t *testing.T) {
 }
 
 func TestRegistryResolveReturnsDefinitionCopy(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definition := testRegistryDefinition("example", "v1")
 	definition.CapabilityTags = []string{"read_only"}
 	if err := registry.Register(&testRegistryTool{definition: definition}); err != nil {
@@ -309,7 +309,7 @@ func TestRegistryResolveReturnsDefinitionCopy(t *testing.T) {
 }
 
 func TestRegistryListAllIncludesDeprecatedToolsAndSortsResults(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definitions := []struct {
 		name       string
 		version    string
@@ -349,7 +349,7 @@ func TestRegistryListAllIncludesDeprecatedToolsAndSortsResults(t *testing.T) {
 }
 
 func TestRegistryListAllReturnsDefinitionCopies(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definition := testRegistryDefinition("example", "v1")
 	definition.CapabilityTags = []string{"read_only"}
 	if err := registry.Register(&testRegistryTool{definition: definition}); err != nil {
@@ -370,7 +370,7 @@ func TestRegistryListAllReturnsDefinitionCopies(t *testing.T) {
 }
 
 func TestRegistryListAvailableExcludesDeprecatedToolsAndSortsResults(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definitions := []struct {
 		name       string
 		version    string
@@ -405,7 +405,7 @@ func TestRegistryListAvailableExcludesDeprecatedToolsAndSortsResults(t *testing.
 }
 
 func TestRegistryListAvailableReturnsDefinitionCopies(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definition := testRegistryDefinition("example", "v1")
 	definition.CapabilityTags = []string{"read_only"}
 	if err := registry.Register(&testRegistryTool{definition: definition}); err != nil {
@@ -426,7 +426,7 @@ func TestRegistryListAvailableReturnsDefinitionCopies(t *testing.T) {
 }
 
 func TestRegistryFindByCapabilityFiltersDeprecatedToolsAndSortsResults(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definitions := []struct {
 		name       string
 		version    string
@@ -462,7 +462,7 @@ func TestRegistryFindByCapabilityFiltersDeprecatedToolsAndSortsResults(t *testin
 }
 
 func TestRegistryFindByCapabilityReturnsEmptyForBlankTag(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	if err := registry.Register(&testRegistryTool{
 		definition: testRegistryDefinition("example", "v1"),
 	}); err != nil {
@@ -475,7 +475,7 @@ func TestRegistryFindByCapabilityReturnsEmptyForBlankTag(t *testing.T) {
 }
 
 func TestRegistryFindByCapabilityReturnsDefinitionCopies(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	definition := testRegistryDefinition("example", "v1")
 	definition.CapabilityTags = []string{"read_only"}
 	if err := registry.Register(&testRegistryTool{definition: definition}); err != nil {
@@ -496,7 +496,7 @@ func TestRegistryFindByCapabilityReturnsDefinitionCopies(t *testing.T) {
 }
 
 func TestRegistryVersionsReturnsSortedVersions(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	for _, version := range []string{"v10", "v2", "v1"} {
 		if err := registry.Register(&testRegistryTool{
 			definition: testRegistryDefinition("example", version),
@@ -518,7 +518,7 @@ func TestRegistryVersionsReturnsSortedVersions(t *testing.T) {
 }
 
 func TestRegistryVersionsReturnsEmptyForUnknownTool(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	if got := registry.Versions("missing"); len(got) != 0 {
 		t.Fatalf("Versions() for unknown tool returned %v, want empty", got)
 	}
@@ -529,7 +529,7 @@ func TestRegistryVersionsReturnsEmptyForUnknownTool(t *testing.T) {
 
 func TestRegistryResolveFeedsToolingInvokeWithoutBypassingBoundary(t *testing.T) {
 	var calls atomic.Int32
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	tool := &testRegistryTool{
 		definition: testRegistryDefinition("example", "v1"),
 		calls:      &calls,
@@ -581,7 +581,7 @@ func TestRegistryResolveFeedsToolingInvokeWithoutBypassingBoundary(t *testing.T)
 }
 
 func TestRegistrySupportsConcurrentRegistrationAndQueries(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewToolRegistry()
 	const toolCount = 32
 
 	var workers sync.WaitGroup

@@ -16,14 +16,14 @@ import (
 // 也不负责调用最终回答模型；最终回答由上层 Agent Runtime 使用 ModelCaller
 // 独立完成。
 type Executor struct {
-	registry *registry.Registry
+	registry *registry.ToolRegistry
 }
 
 // NewExecutor 创建单轮工具调用编排器。
 //
 // 注册中心是执行器发现工具的必要依赖；如果没有注册中心，执行器无法安全
 // 解析模型指定的工具，因此在构造阶段直接拒绝。
-func NewExecutor(toolRegistry *registry.Registry) (*Executor, error) {
+func NewExecutor(toolRegistry *registry.ToolRegistry) (*Executor, error) {
 	if toolRegistry == nil {
 		return nil, ErrExecutorNotConfigured
 	}
