@@ -66,6 +66,7 @@ func TestEventTypeValuesAreStableAndUnique(t *testing.T) {
 		{name: "tool result", event: EventToolResult, want: "tool.result"},
 		{name: "run succeeded", event: EventRunSucceeded, want: "run.succeeded"},
 		{name: "run failed", event: EventRunFailed, want: "run.failed"},
+		{name: "run canceled", event: EventRunCanceled, want: "run.canceled"},
 	}
 
 	seen := make(map[EventType]struct{}, len(tests))

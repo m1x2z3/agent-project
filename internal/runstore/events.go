@@ -18,6 +18,8 @@ const (
 	EventRunSucceeded EventType = "run.succeeded"
 	// EventRunFailed 表示 Run 因错误结束。
 	EventRunFailed EventType = "run.failed"
+	// EventRunCanceled 表示 Run 因 Context 取消或主动取消而结束。
+	EventRunCanceled EventType = "run.canceled"
 )
 
 // RunEvent 是一次 Run 执行过程中的脱敏事件。

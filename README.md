@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-第三周第 6 天：工具循环验收与证据。
+第四周第 2 天：RunStore 接入 Agent Runtime。
 
 本周目标：
 
@@ -122,15 +122,19 @@ Run 记录和事件存储边界位于 `internal/runstore`。该包定义 Run 状
 脱敏观测、执行事件和 `Store` 接口；`internal/runstore/memory` 提供线程安全的
 进程内实现。Run 只保存发布版本、Prompt、Schema、路由和价格版本号，不复制完整
 配置内容；事件只保存类型、状态、耗时、错误分类和参数或结果摘要，不保存完整
-Prompt、模型回答、工具参数、工具结果或 API Key。当前存储层尚未接入 Agent Runtime、
-HTTP 或数据库，进程重启后数据不会保留。
+Prompt、模型回答、工具参数、工具结果或 API Key。当前 `Runtime` 和
+`ToolLoopRuntime` 可以通过可选 `RunStore` 接入该边界，默认仍保持原有不持久化行为；
+当前实现使用内存存储，进程重启后数据不会保留。
 
 Agent Runtime 位于 `internal/agent/runtime.go`，使用 Eino 的类型化 Runnable
 串联配置版本选择、Run 快照绑定、Prompt 渲染、两次模型调用和结构化结果校验。
 Runtime 只依赖 `ModelCaller` 接口，生产环境可以注入模型网关 Router，测试使用
 确定性 Fake。灰度选择和发布门禁位于 `internal/rollout`，当前只提供本地可验证
 实现，不修改 HTTP API，也不自动激活或回滚版本。影子运行只调用模型并解析结果，
-不会执行工具、写数据库或产生外部副作用。
+不会执行工具、写数据库或产生外部副作用。配置快照绑定成功后，普通 Run 可以通过
+`runStoreRecorder` 写入 `run.started`、`model.call` 和最终的 `run.succeeded`、
+`run.failed` 或 `run.canceled`；ToolLoopRuntime 还会记录 `tool.call` 和
+`tool.result`。RunStore 写入失败只通过脱敏回调通知，不改变模型或工具主流程。
 
 工具基础契约位于 `internal/tool/tooling`，定义工具元数据、调用请求、结果 Envelope、
 统一错误、Capability Token 和 Effect Boundary。`structuredoutput.ToolDecision`
@@ -183,7 +187,7 @@ RBAC、审批系统、自动重试或自动降级。
 `docs/evidence/2026-11-25/week3-day6.md`。本阶段只补充测试和证据，
 不新增 HTTP、MCP、数据库、RBAC、审批或真实工具副作用。
 
-当前仍未实现 RBAC、数据库、MCP、审批系统或 Agent 自动工具循环；高风险写工具
+当前仍未实现 RBAC、数据库、MCP、审批系统或 HTTP 层的工具循环接入；高风险写工具
 在审批能力接入前会被边界拒绝。注册中心当前是进程内实现，后续可以在不改变工具
 契约和执行边界的前提下替换为持久化注册中心。
 

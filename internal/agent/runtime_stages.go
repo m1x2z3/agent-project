@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
@@ -69,6 +70,16 @@ func (r *Runtime) bindRunSnapshot(ctx context.Context, state runtimeState) (runt
 		return runtimeState{}, runtimeFailure("bind_run", err)
 	}
 	state.snapshot = snapshot.Snapshot
+	if !state.execution.shadow {
+		// 普通 Run 在快照绑定成功后才创建持久化记录，确保 RunStore 保存的
+		// 配置版本与后续模型调用使用的是同一份不可变快照。
+		state.execution.recorder.recordRunStarted(
+			ctx,
+			state.input,
+			state.snapshot,
+			state.execution.started,
+		)
+	}
 	return state, nil
 }
 
@@ -98,6 +109,7 @@ func (r *Runtime) callAnalysisModel(ctx context.Context, state runtimeState) (ru
 	recordRoute(state.execution, route)
 	// Runtime 只依赖 ModelCaller，不感知 DeepSeek、Kimi 或 OpenAI 兼容协议。
 	// 供应商选择和底层 HTTP 细节由 modelgateway 负责。
+	callStarted := time.Now()
 	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
 		Task:        analysisTask,
 		Provider:    route.Provider,
@@ -107,6 +119,14 @@ func (r *Runtime) callAnalysisModel(ctx context.Context, state runtimeState) (ru
 		Timeout:     route.Timeout,
 		Messages:    []modelgateway.Message{{Role: "user", Content: state.analysisPrompt}},
 	})
+	state.execution.recorder.recordModelCall(
+		ctx,
+		state.input,
+		route,
+		response,
+		time.Since(callStarted),
+		err,
+	)
 	if err != nil {
 		return runtimeState{}, runtimeFailure("analysis_model", fmt.Errorf("%w: %w", ErrAnalysisModelFailed, err))
 	}
@@ -169,6 +189,7 @@ func (r *Runtime) callFinalModel(ctx context.Context, state runtimeState) (runti
 	}
 	recordRoute(state.execution, route)
 	// 这是第二次、面向最终回答的模型调用；仍然通过统一 ModelCaller 执行。
+	callStarted := time.Now()
 	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
 		Task:        finalTask,
 		Provider:    route.Provider,
@@ -178,6 +199,14 @@ func (r *Runtime) callFinalModel(ctx context.Context, state runtimeState) (runti
 		Timeout:     route.Timeout,
 		Messages:    []modelgateway.Message{{Role: "user", Content: state.finalPrompt}},
 	})
+	state.execution.recorder.recordModelCall(
+		ctx,
+		state.input,
+		route,
+		response,
+		time.Since(callStarted),
+		err,
+	)
 	if err != nil {
 		return runtimeState{}, runtimeFailure("final_model", fmt.Errorf("%w: %w", ErrFinalModelFailed, err))
 	}

@@ -8,6 +8,7 @@ import (
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
 	"agent-project/internal/rollout"
+	"agent-project/internal/runstore"
 	"agent-project/internal/structuredoutput"
 	"github.com/cloudwego/eino/compose"
 )
@@ -84,6 +85,8 @@ type RuntimeConfig struct {
 	Selector          *rollout.Selector
 	Model             ModelCaller
 	Observer          Observer
+	RunStore          runstore.Store
+	OnStoreError      RunStoreErrorHandler
 	AnalysisRepair    structuredoutput.RepairFunc
 	FinalAnswerRepair structuredoutput.RepairFunc
 }
@@ -94,6 +97,8 @@ type Runtime struct {
 	selector          *rollout.Selector
 	model             ModelCaller
 	observer          Observer
+	runStore          runstore.Store
+	onStoreError      RunStoreErrorHandler
 	analysisRepair    structuredoutput.RepairFunc
 	finalAnswerRepair structuredoutput.RepairFunc
 	chain             compose.Runnable[RunInput, RunOutput]
@@ -121,6 +126,7 @@ type runtimeExecution struct {
 	mu          sync.Mutex
 	started     time.Time
 	shadow      bool
+	recorder    *runStoreRecorder
 	observation RunObservation
 	observed    bool
 }

@@ -13,6 +13,7 @@ import (
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
 	"agent-project/internal/rollout"
+	"agent-project/internal/runstore"
 	"agent-project/internal/structuredoutput"
 	"agent-project/internal/tool/registry"
 	"agent-project/internal/tool/runner"
@@ -43,6 +44,10 @@ type ToolLoopRuntime struct {
 	authorizer ToolCallAuthorizer
 	// Observer 只接收脱敏运行元数据，不接收 Prompt 或模型原文。
 	observer Observer
+	// runStore 是可选的 Run 记录存储；未配置时保持原有内存观测行为。
+	runStore runstore.Store
+	// onStoreError 接收旁路持久化失败，不改变模型和工具主流程。
+	onStoreError RunStoreErrorHandler
 	// maxCalls 用于限制后续动态工具循环的最大调用次数。
 	maxCalls int
 
@@ -122,6 +127,8 @@ func NewToolLoopRuntime(cfg ToolLoopConfig) (*ToolLoopRuntime, error) {
 		executor:           cfg.Executor,
 		authorizer:         cfg.Authorizer,
 		observer:           observer,
+		runStore:           cfg.RunStore,
+		onStoreError:       cfg.OnStoreError,
 		maxCalls:           maxCalls,
 		analysisRepair:     cfg.AnalysisRepair,
 		toolDecisionRepair: cfg.ToolDecisionRepair,
@@ -159,31 +166,31 @@ func (r *ToolLoopRuntime) Run(
 	state, err = r.runAnalysis(ctx, state)
 	if err != nil {
 		// 任一阶段失败都立即停止，统一记录失败观测，避免继续使用不完整状态。
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
 	// 将用户问题、分析结果和工具历史渲染为下一次模型调用的 Prompt。
 	state, err = r.renderToolDecisionPrompt(ctx, state)
 	if err != nil {
 		// Prompt 渲染失败时不能继续调用模型，统一收口错误和观测。
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
 	// 调用模型获取工具调用意图；此时只是产生决策，还没有执行任何工具。
 	state, err = r.callToolDecisionModel(ctx, state)
 	if err != nil {
 		// 模型调用失败时立即结束本次 Run，不伪造工具决策。
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
 	// 对模型输出执行 JSON、Schema 和业务语义校验，得到可信的 ToolDecision。
 	// 修复逻辑由结构化输出内核控制，最多执行一次。
 	state, err = r.decodeToolDecision(ctx, state)
 	if err != nil {
 		// 决策无法通过校验时不能进入工具执行阶段，统一记录并返回错误。
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return r.failToolLoop(execution, err)
+			return r.failToolLoop(ctx, input, execution, err)
 		}
 		if !state.toolDecision.ShouldCall {
 			break
@@ -191,48 +198,50 @@ func (r *ToolLoopRuntime) Run(
 
 		state, err = r.authorizeToolDecision(ctx, state)
 		if err != nil {
-			return r.failToolLoop(execution, err)
+			return r.failToolLoop(ctx, input, execution, err)
 		}
 		state, err = r.checkDuplicateToolCall(ctx, state)
 		if err != nil {
-			return r.failToolLoop(execution, err)
+			return r.failToolLoop(ctx, input, execution, err)
 		}
 		state, err = r.executeTool(ctx, state)
 		if err != nil {
-			return r.failToolLoop(execution, err)
+			return r.failToolLoop(ctx, input, execution, err)
 		}
 		state, err = r.continueToolDecision(ctx, state)
 		if err != nil {
-			return r.failToolLoop(execution, err)
+			return r.failToolLoop(ctx, input, execution, err)
 		}
 	}
 
 	state, err = r.renderToolLoopFinalPrompt(ctx, state)
 	if err != nil {
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
 	state, err = r.callToolLoopFinalModel(ctx, state)
 	if err != nil {
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
 	state, err = r.decodeToolLoopFinalAnswer(ctx, state)
 	if err != nil {
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
 	output, err := r.formatToolLoopOutput(ctx, state)
 	if err != nil {
-		return r.failToolLoop(execution, err)
+		return r.failToolLoop(ctx, input, execution, err)
 	}
-	r.observeToolLoopExecution(execution, output, nil)
+	r.observeToolLoopExecution(ctx, input, execution, output, nil)
 	return output, nil
 }
 
 // failToolLoop 统一收口失败路径，并保证当前 Run 的观测只提交一次。
 func (r *ToolLoopRuntime) failToolLoop(
+	ctx context.Context,
+	input RunInput,
 	execution *runtimeExecution,
 	err error,
 ) (ToolLoopOutput, error) {
-	r.observeToolLoopExecution(execution, ToolLoopOutput{}, err)
+	r.observeToolLoopExecution(ctx, input, execution, ToolLoopOutput{}, err)
 	return ToolLoopOutput{}, err
 }
 
@@ -274,6 +283,12 @@ func (r *ToolLoopRuntime) selectAndBindSnapshot(
 	// 从这里开始，观测和后续阶段都携带同一个 release version。
 	execution := &runtimeExecution{
 		started: time.Now(),
+		// 每次工具循环都使用独立的记录器，确保本次 Run 的事件带有
+		// 正确的 Run、Request 和 Tenant 标识；记录器本身只负责旁路存储。
+		recorder: &runStoreRecorder{
+			store:   r.runStore,
+			onError: r.onStoreError,
+		},
 		observation: RunObservation{
 			RequestID:      input.RequestID,
 			TenantID:       input.TenantID,
@@ -281,6 +296,14 @@ func (r *ToolLoopRuntime) selectAndBindSnapshot(
 			ReleaseVersion: bound.ReleaseVersion,
 		},
 	}
+	// 快照绑定成功后登记 run.started，后续 model.call 和工具事件才能
+	// 追加到同一条已存在的 Run 记录；存储失败不会影响主流程。
+	execution.recorder.recordRunStarted(
+		ctx,
+		input,
+		bound.Snapshot,
+		execution.started,
+	)
 	return toolLoopState{
 		input:     input,
 		execution: execution,
@@ -320,6 +343,7 @@ func (r *ToolLoopRuntime) runAnalysis(
 	recordRoute(state.execution, route)
 
 	// 模型调用只接收已经渲染好的 Prompt；原始供应商协议由 ModelCaller 屏蔽。
+	callStarted := time.Now()
 	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
 		Task:        analysisTask,
 		Provider:    route.Provider,
@@ -329,6 +353,16 @@ func (r *ToolLoopRuntime) runAnalysis(
 		Timeout:     route.Timeout,
 		Messages:    []modelgateway.Message{{Role: "user", Content: rendered}},
 	})
+	if state.execution != nil && state.execution.recorder != nil {
+		state.execution.recorder.recordModelCall(
+			ctx,
+			state.input,
+			route,
+			response,
+			time.Since(callStarted),
+			err,
+		)
+	}
 	if err != nil {
 		return toolLoopState{}, runtimeFailure(
 			"tool_loop_analysis_model",
@@ -387,6 +421,40 @@ func digestToolArguments(arguments map[string]any) (string, error) {
 	}
 	sum := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// digestToolResult 为工具结果生成稳定摘要。
+//
+// 摘要输入只包含结果状态、工具身份、错误码、结构化数据和来源位置；
+// 错误消息不会进入摘要，避免把供应商或数据源原文间接带入持久化记录。
+// 原始结果只在当前进程内参与计算，RunStore 只保存最终哈希。
+func digestToolResult(
+	request runner.ToolCallRequest,
+	result tooling.ToolResult,
+	executionErr error,
+) string {
+	status, errorCode := toolExecutionEventStatus(result, executionErr)
+	payload := struct {
+		ToolName    string
+		ToolVersion string
+		Status      string
+		ErrorCode   string
+		Data        json.RawMessage
+		Source      []tooling.SourceRef
+	}{
+		ToolName:    request.Decision.ToolName,
+		ToolVersion: request.ToolVersion,
+		Status:      status,
+		ErrorCode:   errorCode,
+		Data:        result.Data,
+		Source:      result.Source,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		encoded = []byte(status + ":" + errorCode)
+	}
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // renderToolDecisionPrompt 为当前待执行的工具决策轮次构造模型输入。
@@ -504,6 +572,7 @@ func (r *ToolLoopRuntime) callToolLoopFinalModel(
 	recordRoute(state.execution, route)
 
 	// 这里只调用模型生成最终回答文本，不允许模型响应绕过后续解析校验。
+	callStarted := time.Now()
 	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
 		Task:        finalTask,
 		Provider:    route.Provider,
@@ -516,6 +585,16 @@ func (r *ToolLoopRuntime) callToolLoopFinalModel(
 			Content: state.finalPrompt,
 		}},
 	})
+	if state.execution != nil && state.execution.recorder != nil {
+		state.execution.recorder.recordModelCall(
+			ctx,
+			state.input,
+			route,
+			response,
+			time.Since(callStarted),
+			err,
+		)
+	}
 	if err != nil {
 		return toolLoopState{}, runtimeFailure(
 			"tool_loop_final_model",
@@ -637,6 +716,8 @@ func (r *ToolLoopRuntime) formatToolLoopOutput(
 // 它复用普通 Runtime 的观测实现，确保工具循环同样记录总耗时、模型用量、
 // 成本、发布版本和错误分类，并且不会记录 Prompt、模型原文或工具完整数据。
 func (r *ToolLoopRuntime) observeToolLoopExecution(
+	ctx context.Context,
+	input RunInput,
 	execution *runtimeExecution,
 	output ToolLoopOutput,
 	runErr error,
@@ -645,6 +726,13 @@ func (r *ToolLoopRuntime) observeToolLoopExecution(
 		return
 	}
 	recordExecutionObservation(r.observer, execution, output.RunOutput, runErr)
+	if execution == nil || execution.shadow || execution.recorder == nil {
+		return
+	}
+	// 工具循环与普通 Runtime 共用同一个 RunStore 生命周期：
+	// 先提交最终观测，再由 finishRun 写入 run.succeeded、run.failed
+	// 或 run.canceled，并更新 Run 的最终状态。
+	execution.recorder.finishRun(ctx, input, execution, runErr)
 }
 
 // callToolDecisionModel 使用当前 Run 快照中的工具决策路由调用模型。
@@ -666,6 +754,7 @@ func (r *ToolLoopRuntime) callToolDecisionModel(
 	recordRoute(state.execution, route)
 
 	// 这里只请求模型给出调用意图，不允许模型响应直接触发工具。
+	callStarted := time.Now()
 	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
 		Task:        toolDecisionTask,
 		Provider:    route.Provider,
@@ -678,6 +767,16 @@ func (r *ToolLoopRuntime) callToolDecisionModel(
 			Content: state.toolDecisionPrompt,
 		}},
 	})
+	if state.execution != nil && state.execution.recorder != nil {
+		state.execution.recorder.recordModelCall(
+			ctx,
+			state.input,
+			route,
+			response,
+			time.Since(callStarted),
+			err,
+		)
+	}
 	if err != nil {
 		return toolLoopState{}, runtimeFailure(
 			"tool_loop_tool_decision_model",
@@ -923,7 +1022,31 @@ func (r *ToolLoopRuntime) executeTool(
 
 	// Executor 会完成工具解析、参数编码、租户和 Capability Token 校验，
 	// 最终再把调用交给 tooling.Invoke。
+	if state.execution != nil && state.execution.recorder != nil {
+		state.execution.recorder.recordToolCall(
+			ctx,
+			state.input,
+			state.toolCallRequest.Decision.ToolName,
+			state.toolCallRequest.ToolVersion,
+			digest,
+		)
+	}
+	callStarted := time.Now()
 	result, err := r.executor.Execute(ctx, state.toolCallRequest)
+	status, errorCode := toolExecutionEventStatus(result, err)
+	if state.execution != nil && state.execution.recorder != nil {
+		state.execution.recorder.recordToolResult(
+			ctx,
+			state.input,
+			state.toolCallRequest.Decision.ToolName,
+			state.toolCallRequest.ToolVersion,
+			status,
+			errorCode,
+			digest,
+			digestToolResult(state.toolCallRequest, result, err),
+			time.Since(callStarted),
+		)
+	}
 	state.toolHistory = append(state.toolHistory, toolHistoryEntryFromExecution(
 		state.toolCallRequest,
 		digest,
@@ -940,6 +1063,22 @@ func (r *ToolLoopRuntime) executeTool(
 		)
 	}
 	return state, nil
+}
+
+// toolExecutionEventStatus 将工具结果或执行边界错误转换为事件可保存的
+// 稳定状态和错误分类，不传播工具实现、数据源或供应商的原始错误消息。
+func toolExecutionEventStatus(
+	result tooling.ToolResult,
+	executionErr error,
+) (string, string) {
+	if result.Status != "" {
+		if result.Error != nil {
+			return string(result.Status), result.Error.Code
+		}
+		return string(result.Status), ""
+	}
+	status, errorCode := classifyToolExecutionError(executionErr)
+	return string(status), errorCode
 }
 
 // toolHistoryEntryFromExecution 将工具结果转换成下一轮模型可见的历史项。

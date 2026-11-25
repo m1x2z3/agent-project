@@ -5,6 +5,7 @@ import (
 
 	"agent-project/internal/configregistry"
 	"agent-project/internal/rollout"
+	"agent-project/internal/runstore"
 	"agent-project/internal/structuredoutput"
 	"agent-project/internal/tool/runner"
 	"agent-project/internal/tool/tooling"
@@ -48,12 +49,14 @@ type ToolCallAuthorizer func(
 // Registry、Selector 和 Model 负责配置版本选择与模型调用；Executor
 // 负责工具发现和执行；Authorizer 负责注入模型之外的可信授权上下文。
 type ToolLoopConfig struct {
-	Registry   *configregistry.Registry
-	Selector   *rollout.Selector
-	Model      ModelCaller
-	Executor   *runner.Executor
-	Authorizer ToolCallAuthorizer
-	Observer   Observer
+	Registry     *configregistry.Registry
+	Selector     *rollout.Selector
+	Model        ModelCaller
+	Executor     *runner.Executor
+	Authorizer   ToolCallAuthorizer
+	Observer     Observer
+	RunStore     runstore.Store
+	OnStoreError RunStoreErrorHandler
 
 	MaxToolCalls int
 

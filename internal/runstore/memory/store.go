@@ -100,7 +100,8 @@ func (s *MemoryStore) AppendEvent(ctx context.Context, event runstore.RunEvent) 
 		runstore.EventToolCall,
 		runstore.EventToolResult,
 		runstore.EventRunSucceeded,
-		runstore.EventRunFailed:
+		runstore.EventRunFailed,
+		runstore.EventRunCanceled:
 	default:
 		return runstore.ErrInvalidEventType
 	}

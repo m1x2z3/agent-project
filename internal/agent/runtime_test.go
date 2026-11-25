@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
 	"agent-project/internal/rollout"
+	"agent-project/internal/runstore"
+	"agent-project/internal/runstore/memory"
 	"agent-project/internal/structuredoutput"
 )
 
@@ -70,6 +73,291 @@ func TestRuntimeRunsVersionedChainAndObservesMetadata(t *testing.T) {
 		observer.items[0].TotalTokens != 6 ||
 		observer.items[0].Cost <= 0 {
 		t.Fatalf("unexpected observation: %+v", observer.items)
+	}
+}
+
+func TestRuntimeStoresOptionalRunStoreDependencies(t *testing.T) {
+	registry := configregistry.NewRegistry()
+	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}}")
+	if err := registry.Activate("v1"); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	selector, err := rollout.NewSelector(registry, rollout.RolloutPolicy{
+		CandidateVersion: "v1",
+		Percentage:       100,
+	})
+	if err != nil {
+		t.Fatalf("NewSelector() error = %v", err)
+	}
+
+	store := memory.NewMemoryStore()
+	handler := func(RunStoreFailure) {}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Registry:     registry,
+		Selector:     selector,
+		Model:        &fakeRuntimeModel{},
+		RunStore:     store,
+		OnStoreError: handler,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	if runtime.runStore != store {
+		t.Fatal("Runtime did not retain RunStore")
+	}
+	if runtime.onStoreError == nil {
+		t.Fatal("Runtime did not retain OnStoreError")
+	}
+}
+
+func TestRuntimeRunStoreRecordsSuccessfulLifecycle(t *testing.T) {
+	store := memory.NewMemoryStore()
+	runtime := newRuntimeWithRunStore(t, &fakeRuntimeModel{}, store)
+	input := RunInput{
+		RequestID: "request-runtime-store-success",
+		TenantID:  "tenant-a",
+		RunID:     "run-runtime-store-success",
+		Query:     "定位订单服务错误",
+	}
+
+	if _, err := runtime.Run(context.Background(), input); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	wantTypes := []runstore.EventType{
+		runstore.EventRunStarted,
+		runstore.EventModelCall,
+		runstore.EventModelCall,
+		runstore.EventRunSucceeded,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events = %+v, want %d events", events, len(wantTypes))
+	}
+	for index, wantType := range wantTypes {
+		if events[index].Type != wantType {
+			t.Fatalf("events[%d].Type = %q, want %q", index, events[index].Type, wantType)
+		}
+	}
+	if events[1].Provider != "fake" || events[1].Model != "fake-task_analysis" ||
+		events[2].Provider != "fake" || events[2].Model != "fake-final_answer" {
+		t.Fatalf("model events did not store provider and model: %+v", events[1:3])
+	}
+	for _, event := range events {
+		eventText := fmt.Sprintf("%+v", event)
+		if strings.Contains(eventText, input.Query) ||
+			strings.Contains(eventText, "已定位") {
+			t.Fatalf("event contains sensitive content: %s", eventText)
+		}
+	}
+	record, err := store.GetRun(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.Status != runstore.RunSucceeded ||
+		record.Config.ReleaseVersion != "v1" ||
+		record.Config.PromptVersions["task_analysis"] != "prompt.analysis.v1" ||
+		record.Config.SchemaVersions["final_answer"] != "final_answer.v1" ||
+		record.Config.RouteVersions["final_answer"] != "route.final.v1" {
+		t.Fatalf("stored run = %+v", record)
+	}
+}
+
+func TestRuntimeRunStoreRecordsFailedLifecycle(t *testing.T) {
+	store := memory.NewMemoryStore()
+	expected := errors.New("provider unavailable")
+	runtime := newRuntimeWithRunStore(t, &fakeRuntimeModel{err: expected}, store)
+	input := RunInput{
+		RequestID: "request-runtime-store-failure",
+		TenantID:  "tenant-a",
+		RunID:     "run-runtime-store-failure",
+		Query:     "定位订单服务错误",
+	}
+
+	_, err := runtime.Run(context.Background(), input)
+	if !errors.Is(err, ErrAnalysisModelFailed) {
+		t.Fatalf("Run() error = %v, want ErrAnalysisModelFailed", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 3 ||
+		events[0].Type != runstore.EventRunStarted ||
+		events[1].Type != runstore.EventModelCall ||
+		events[1].Status != "failed" ||
+		events[1].ErrorKind != "model_error" ||
+		events[2].Type != runstore.EventRunFailed {
+		t.Fatalf("failure events = %+v", events)
+	}
+	record, err := store.GetRun(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.Status != runstore.RunFailed ||
+		record.Observation.ErrorKind != "analysis_model_error" {
+		t.Fatalf("failed run = %+v", record)
+	}
+}
+
+func TestRuntimeRunStoreRecordsCanceledLifecycle(t *testing.T) {
+	store := memory.NewMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	model := &cancelAfterAnalysisModel{cancel: cancel}
+	runtime := newRuntimeWithRunStore(t, model, store)
+	input := RunInput{
+		RequestID: "request-runtime-store-canceled",
+		TenantID:  "tenant-a",
+		RunID:     "run-runtime-store-canceled",
+		Query:     "定位订单服务错误",
+	}
+
+	_, err := runtime.Run(ctx, input)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 3 ||
+		events[0].Type != runstore.EventRunStarted ||
+		events[1].Type != runstore.EventModelCall ||
+		events[2].Type != runstore.EventRunCanceled {
+		t.Fatalf("canceled events = %+v", events)
+	}
+	record, err := store.GetRun(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.Status != runstore.RunCanceled ||
+		record.Observation.ErrorKind != "canceled" {
+		t.Fatalf("canceled run = %+v", record)
+	}
+}
+
+func TestRuntimeContinuesWhenRunStoreWriteFails(t *testing.T) {
+	store := &recordingStore{
+		createErr: errors.New("storage failure contains API key"),
+	}
+	var failures []RunStoreFailure
+	runtime := newRuntimeWithRunStore(t, &fakeRuntimeModel{}, store)
+	runtime.onStoreError = func(failure RunStoreFailure) {
+		failures = append(failures, failure)
+	}
+	input := RunInput{
+		RequestID: "request-store-failure",
+		TenantID:  "tenant-a",
+		RunID:     "run-store-failure",
+		Query:     "敏感查询内容",
+	}
+
+	output, err := runtime.Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want main flow to succeed", err)
+	}
+	if output.FinalAnswer.Status != structuredoutput.FinalAnswerStatusAnswered {
+		t.Fatalf("output = %+v, want answered", output)
+	}
+	if len(failures) != 1 ||
+		failures[0].Operation != "create_run" ||
+		failures[0].ErrorKind != "storage_error" ||
+		failures[0].RunID != input.RunID {
+		t.Fatalf("store failures = %+v", failures)
+	}
+	failureText := fmt.Sprintf("%+v", failures[0])
+	if strings.Contains(failureText, "API key") ||
+		strings.Contains(failureText, input.Query) {
+		t.Fatalf("store failure leaked sensitive content: %s", failureText)
+	}
+}
+
+func TestRuntimeShadowDoesNotWriteRunStore(t *testing.T) {
+	store := memory.NewMemoryStore()
+	runtime := newRuntimeWithRunStore(t, &fakeRuntimeModel{}, store)
+	input := RunInput{
+		RequestID: "request-shadow-store",
+		TenantID:  "tenant-a",
+		RunID:     "run-shadow-store",
+		Query:     "影子查询",
+	}
+
+	output, err := runtime.RunShadow(context.Background(), input)
+	if err != nil {
+		t.Fatalf("RunShadow() error = %v", err)
+	}
+	if !output.Shadow {
+		t.Fatalf("shadow output = %+v, want Shadow=true", output)
+	}
+	if _, err := store.GetRun(context.Background(), input.RunID); !errors.Is(err, runstore.ErrRunNotFound) {
+		t.Fatalf("shadow Run unexpectedly persisted: %v", err)
+	}
+	if _, err := store.ListEvents(context.Background(), input.RunID); !errors.Is(err, runstore.ErrRunNotFound) {
+		t.Fatalf("shadow events unexpectedly persisted: %v", err)
+	}
+}
+
+func TestRuntimeRunStoreSupportsConcurrentRuns(t *testing.T) {
+	store := memory.NewMemoryStore()
+	runtime := newRuntimeWithRunStore(t, &fakeRuntimeModel{}, store)
+
+	const runCount = 16
+	errCh := make(chan error, runCount)
+	var waitGroup sync.WaitGroup
+	for index := 0; index < runCount; index++ {
+		index := index
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			input := RunInput{
+				RequestID: fmt.Sprintf("request-concurrent-store-%d", index),
+				TenantID:  "tenant-a",
+				RunID:     fmt.Sprintf("run-concurrent-store-%d", index),
+				Query:     "并发查询",
+			}
+			output, err := runtime.Run(context.Background(), input)
+			if err != nil {
+				errCh <- fmt.Errorf("%s: Run() error: %w", input.RunID, err)
+				return
+			}
+			if output.RunID != input.RunID ||
+				output.ReleaseVersion != "v1" ||
+				output.FinalAnswer.Status != structuredoutput.FinalAnswerStatusAnswered {
+				errCh <- fmt.Errorf("%s: unexpected output: %+v", input.RunID, output)
+				return
+			}
+			record, err := store.GetRun(context.Background(), input.RunID)
+			if err != nil {
+				errCh <- fmt.Errorf("%s: GetRun() error: %w", input.RunID, err)
+				return
+			}
+			if record.Status != runstore.RunSucceeded {
+				errCh <- fmt.Errorf("%s: status = %q, want %q",
+					input.RunID, record.Status, runstore.RunSucceeded)
+				return
+			}
+			events, err := store.ListEvents(context.Background(), input.RunID)
+			if err != nil {
+				errCh <- fmt.Errorf("%s: ListEvents() error: %w", input.RunID, err)
+				return
+			}
+			if len(events) != 4 ||
+				events[0].Type != runstore.EventRunStarted ||
+				events[3].Type != runstore.EventRunSucceeded {
+				errCh <- fmt.Errorf("%s: events = %+v", input.RunID, events)
+			}
+		}()
+	}
+	waitGroup.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatal(err)
 	}
 }
 
@@ -355,6 +643,31 @@ type fakeRuntimeModel struct {
 	analysisContent string
 }
 
+type cancelAfterAnalysisModel struct {
+	cancel context.CancelFunc
+}
+
+func (m *cancelAfterAnalysisModel) Chat(
+	_ context.Context,
+	request modelgateway.ChatRequest,
+) (modelgateway.ChatResponse, error) {
+	if request.Task != analysisTask {
+		return modelgateway.ChatResponse{}, context.Canceled
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return modelgateway.ChatResponse{
+		Provider: request.Provider,
+		Model:    request.Model,
+		Message: modelgateway.Message{
+			Role:    "assistant",
+			Content: `{"summary":"定位订单服务错误","confidence":0.9}`,
+		},
+		Usage: &modelgateway.Usage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 3},
+	}, nil
+}
+
 func (m *fakeRuntimeModel) Chat(ctx context.Context, request modelgateway.ChatRequest) (modelgateway.ChatResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return modelgateway.ChatResponse{}, err
@@ -408,6 +721,36 @@ func publishRuntimeSnapshot(t *testing.T, registry *configregistry.Registry, ver
 	if err := registry.Publish(snapshot); err != nil {
 		t.Fatalf("Publish(%s) error = %v", version, err)
 	}
+}
+
+func newRuntimeWithRunStore(
+	t *testing.T,
+	model ModelCaller,
+	store runstore.Store,
+) *Runtime {
+	t.Helper()
+	registry := configregistry.NewRegistry()
+	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}} / {{.Analysis.Summary}}")
+	if err := registry.Activate("v1"); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	selector, err := rollout.NewSelector(registry, rollout.RolloutPolicy{
+		CandidateVersion: "v1",
+		Percentage:       100,
+	})
+	if err != nil {
+		t.Fatalf("NewSelector() error = %v", err)
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Registry: registry,
+		Selector: selector,
+		Model:    model,
+		RunStore: store,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	return runtime
 }
 
 func runtimeSnapshot(version, analysisTemplate, finalTemplate string) configregistry.ConfigSnapshot {

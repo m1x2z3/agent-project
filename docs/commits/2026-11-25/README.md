@@ -36,6 +36,41 @@ go test -race ./...
 验证结果：格式检查、全部测试、`go vet` 和 race 检查均通过。
 本阶段不填写 commit hash，等待用户确认后再提交。
 
+## 第四周第 2 天：RunStore 接入 Agent Runtime
+
+状态：已完成开发和验证，暂不提交 Git。
+
+主要内容：
+
+- 为普通 `Runtime` 和 `ToolLoopRuntime` 增加可选 `runstore.Store` 依赖；
+- 新增 `runStoreRecorder`，统一创建 Run、追加脱敏事件和收口最终状态；
+- 普通 Runtime 记录 `run.started`、`model.call` 和 `run.succeeded`、
+  `run.failed`、`run.canceled`；
+- ToolLoopRuntime 额外记录 `tool.call` 和 `tool.result`，并统一记录分析、
+  工具决策和最终回答模型调用；
+- 新增 `run.canceled` 事件类型；
+- RunStore 只保存发布版本、Prompt、Schema、路由和价格版本引用，不保存完整配置；
+- 工具参数和工具结果只保存 SHA-256 摘要，模型 Prompt、回答、API Key 和底层错误
+  原文不会写入 RunStore；
+- RunStore 写入失败通过 `RunStoreErrorHandler` 脱敏通知，不影响主流程；
+- 主请求取消后使用脱离取消信号的存储 Context，尽力保存取消结果；
+- 影子运行不写入 RunStore；
+- 增加普通 Runtime 和 ToolLoopRuntime 的 MemoryStore 集成测试，覆盖成功、失败、
+  取消、工具解析失败、工具执行失败、并发运行、影子运行和脱敏；
+- 更新 RunStore 边界说明，明确配置注册中心、Runtime、Recorder 和 Store 的职责。
+
+验证结果：
+
+```text
+gofmt -l .
+go test ./...
+go vet ./...
+go test -race ./...
+```
+
+以上检查通过。当前仍使用进程内 `MemoryStore`，未接入数据库、HTTP 管理接口、
+RBAC、审批系统或新的 HTTP API。
+
 ## 第四周第 1 天：Run 记录与事件存储基础
 
 状态：已完成开发和阶段验证，等待确认后提交。

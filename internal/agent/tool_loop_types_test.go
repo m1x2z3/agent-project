@@ -13,6 +13,8 @@ import (
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
 	"agent-project/internal/rollout"
+	"agent-project/internal/runstore"
+	"agent-project/internal/runstore/memory"
 	"agent-project/internal/structuredoutput"
 	"agent-project/internal/tool/registry"
 	"agent-project/internal/tool/runner"
@@ -154,13 +156,75 @@ func TestToolLoopObserveExecutionOnlyOnce(t *testing.T) {
 		},
 	}
 
-	runtime.observeToolLoopExecution(execution, output, nil)
-	runtime.observeToolLoopExecution(execution, output, nil)
+	runtime.observeToolLoopExecution(
+		context.Background(),
+		RunInput{RequestID: "request-1", TenantID: "tenant-1", RunID: "run-1"},
+		execution,
+		output,
+		nil,
+	)
+	runtime.observeToolLoopExecution(
+		context.Background(),
+		RunInput{RequestID: "request-1", TenantID: "tenant-1", RunID: "run-1"},
+		execution,
+		output,
+		nil,
+	)
 	if len(observer.items) != 1 {
 		t.Fatalf("observer items = %d, want 1", len(observer.items))
 	}
 	if !observer.items[0].Success || observer.items[0].Provider != "fake" {
 		t.Fatalf("observation = %+v", observer.items[0])
+	}
+}
+
+func TestToolLoopObserveExecutionFinishesRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		runErr     error
+		wantStatus runstore.RunStatus
+		wantEvent  runstore.EventType
+	}{
+		{name: "success", wantStatus: runstore.RunSucceeded, wantEvent: runstore.EventRunSucceeded},
+		{name: "failure", runErr: errors.New("model failed"), wantStatus: runstore.RunFailed, wantEvent: runstore.EventRunFailed},
+		{name: "canceled", runErr: context.Canceled, wantStatus: runstore.RunCanceled, wantEvent: runstore.EventRunCanceled},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &recordingStore{}
+			execution := &runtimeExecution{
+				started: time.Now(),
+				recorder: &runStoreRecorder{
+					store: store,
+				},
+				observation: RunObservation{
+					RequestID: "request-finish-" + test.name,
+					TenantID:  "tenant-a",
+					RunID:     "run-finish-" + test.name,
+				},
+			}
+			input := RunInput{
+				RequestID: execution.observation.RequestID,
+				TenantID:  execution.observation.TenantID,
+				RunID:     execution.observation.RunID,
+			}
+			runtime := &ToolLoopRuntime{}
+
+			runtime.observeToolLoopExecution(
+				context.Background(),
+				input,
+				execution,
+				ToolLoopOutput{},
+				test.runErr,
+			)
+
+			if store.finishedStatus != test.wantStatus {
+				t.Fatalf("finished status = %q, want %q", store.finishedStatus, test.wantStatus)
+			}
+			if len(store.events) != 1 || store.events[0].Type != test.wantEvent {
+				t.Fatalf("finish events = %+v, want %q", store.events, test.wantEvent)
+			}
+		})
 	}
 }
 
@@ -179,6 +243,46 @@ func TestToolLoopConfigStoresExecutionDependencies(t *testing.T) {
 	}
 	if config.Authorizer == nil || config.MaxToolCalls != 3 {
 		t.Fatalf("ToolLoopConfig = %+v", config)
+	}
+}
+
+func TestNewToolLoopRuntimeStoresOptionalRunStoreDependencies(t *testing.T) {
+	registry := configregistry.NewRegistry()
+	if err := registry.Publish(toolLoopSnapshot("v1")); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if err := registry.Activate("v1"); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	selector, err := rollout.NewSelector(registry, rollout.RolloutPolicy{
+		CandidateVersion: "v1",
+		Percentage:       100,
+	})
+	if err != nil {
+		t.Fatalf("NewSelector() error = %v", err)
+	}
+
+	store := memory.NewMemoryStore()
+	handler := func(RunStoreFailure) {}
+	runtime, err := NewToolLoopRuntime(ToolLoopConfig{
+		Registry: registry,
+		Selector: selector,
+		Model:    &fakeRuntimeModel{},
+		Executor: &runner.Executor{},
+		Authorizer: func(context.Context, RunInput, structuredoutput.ToolDecision) (runner.ToolCallRequest, error) {
+			return runner.ToolCallRequest{}, nil
+		},
+		RunStore:     store,
+		OnStoreError: handler,
+	})
+	if err != nil {
+		t.Fatalf("NewToolLoopRuntime() error = %v", err)
+	}
+	if runtime.runStore != store {
+		t.Fatal("ToolLoopRuntime did not retain RunStore")
+	}
+	if runtime.onStoreError == nil {
+		t.Fatal("ToolLoopRuntime did not retain OnStoreError")
 	}
 }
 
@@ -299,6 +403,337 @@ func TestToolLoopRunExecutesToolThenProducesFinalAnswer(t *testing.T) {
 	if len(observer.items) != 1 || !observer.items[0].Success ||
 		observer.items[0].TotalTokens != 12 {
 		t.Fatalf("unexpected observation: %+v", observer.items)
+	}
+}
+
+func TestToolLoopRunRecordsStartedAndModelCallEvents(t *testing.T) {
+	configStore := configregistry.NewRegistry()
+	if err := configStore.Publish(toolLoopSnapshot("v1")); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if err := configStore.Activate("v1"); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	selector, err := rollout.NewSelector(configStore, rollout.RolloutPolicy{
+		CandidateVersion: "v1",
+		Percentage:       100,
+	})
+	if err != nil {
+		t.Fatalf("NewSelector() error = %v", err)
+	}
+	tool := &toolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		result: tooling.ToolResult{
+			Status: tooling.ResultSuccess,
+			Data:   json.RawMessage(`{"hits":[]}`),
+		},
+	}
+	toolRegistry := registry.NewToolRegistry()
+	if err := toolRegistry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	executor, err := runner.NewExecutor(toolRegistry)
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	store := memory.NewMemoryStore()
+	runtime, err := NewToolLoopRuntime(ToolLoopConfig{
+		Registry: configStore,
+		Selector: selector,
+		Model:    &toolLoopIntegrationModel{},
+		Executor: executor,
+		RunStore: store,
+		Authorizer: func(
+			_ context.Context,
+			input RunInput,
+			decision structuredoutput.ToolDecision,
+		) (runner.ToolCallRequest, error) {
+			return validToolLoopCallRequest(input, decision), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewToolLoopRuntime() error = %v", err)
+	}
+
+	input := RunInput{
+		RequestID: "request-store-model-events",
+		TenantID:  "tenant-a",
+		RunID:     "run-store-model-events",
+		Query:     "查询订单服务文档",
+	}
+	if _, err := runtime.Run(context.Background(), input); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 8 {
+		t.Fatalf("events count = %d, want 8: %+v", len(events), events)
+	}
+	if events[0].Type != runstore.EventRunStarted {
+		t.Fatalf("first event = %+v, want run.started", events[0])
+	}
+	if events[3].Type != runstore.EventToolCall ||
+		events[3].ToolName != "tool_loop_test" ||
+		events[3].ToolVersion != "v1" ||
+		events[3].Status != "started" ||
+		events[3].ArgumentsDigest == "" {
+		t.Fatalf("tool call event = %+v", events[3])
+	}
+	if events[4].Type != runstore.EventToolResult ||
+		events[4].ToolName != "tool_loop_test" ||
+		events[4].ToolVersion != "v1" ||
+		events[4].Status != string(tooling.ResultSuccess) ||
+		events[4].DurationMS < 0 ||
+		events[4].ArgumentsDigest == "" ||
+		events[4].ResultDigest == "" {
+		t.Fatalf("tool result event = %+v", events[4])
+	}
+	for _, event := range events[3:5] {
+		eventText := fmt.Sprintf("%+v", event)
+		if strings.Contains(eventText, "tool-secret") ||
+			strings.Contains(eventText, "error") {
+			t.Fatalf("tool event contains sensitive content: %s", eventText)
+		}
+	}
+	wantModels := []string{
+		"fake-task_analysis",
+		"fake-tool_decision",
+		"fake-tool_decision",
+		"fake-final_answer",
+	}
+	for index, wantModel := range wantModels {
+		eventIndex := index + 1
+		if index >= 2 {
+			eventIndex += 2
+		}
+		event := events[eventIndex]
+		if event.Type != runstore.EventModelCall ||
+			event.Model != wantModel ||
+			event.Provider != "fake" ||
+			event.Status != "success" ||
+			event.DurationMS < 0 {
+			t.Fatalf("model event %d = %+v, want model %q", index, event, wantModel)
+		}
+		eventText := fmt.Sprintf("%+v", event)
+		if strings.Contains(eventText, "查询订单服务文档") ||
+			strings.Contains(eventText, "已完成") {
+			t.Fatalf("model event contains sensitive content: %s", eventText)
+		}
+	}
+	if events[7].Type != runstore.EventRunSucceeded ||
+		events[7].Status != string(runstore.RunSucceeded) {
+		t.Fatalf("finish event = %+v, want run.succeeded", events[7])
+	}
+	record, err := store.GetRun(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.Status != runstore.RunSucceeded {
+		t.Fatalf("run status = %q, want %q", record.Status, runstore.RunSucceeded)
+	}
+}
+
+func TestToolLoopRunStoreRecordsToolResolutionFailure(t *testing.T) {
+	model := &toolLoopFailureModel{
+		decisionContent: `{"should_call":true,"tool_name":"missing_tool","arguments":{"query":"sensitive-query"}}`,
+	}
+	store := memory.NewMemoryStore()
+	input := toolLoopRunInput("run-store-tool-not-found")
+	runtime := newToolLoopRunStoreRuntime(
+		t,
+		model,
+		nil,
+		store,
+		func(
+			_ context.Context,
+			input RunInput,
+			decision structuredoutput.ToolDecision,
+		) (runner.ToolCallRequest, error) {
+			return validToolLoopCallRequest(input, decision), nil
+		},
+	)
+
+	_, err := runtime.Run(context.Background(), input)
+	if !errors.Is(err, ErrToolExecutionFailed) ||
+		!errors.Is(err, registry.ErrToolNotFound) {
+		t.Fatalf("Run() error = %v, want tool execution and not-found errors", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	wantTypes := []runstore.EventType{
+		runstore.EventRunStarted,
+		runstore.EventModelCall,
+		runstore.EventModelCall,
+		runstore.EventToolCall,
+		runstore.EventToolResult,
+		runstore.EventRunFailed,
+	}
+	assertToolLoopEventTypes(t, events, wantTypes)
+	if events[4].Status != string(tooling.ResultNotFound) ||
+		events[4].ErrorKind != "tool_not_found" ||
+		events[4].ArgumentsDigest == "" ||
+		events[4].ResultDigest == "" {
+		t.Fatalf("tool failure event = %+v", events[4])
+	}
+	assertToolLoopEventsRedacted(t, events, input.Query, "sensitive-query")
+
+	record, err := store.GetRun(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.Status != runstore.RunFailed ||
+		record.Config.ReleaseVersion != "v1" ||
+		record.Config.PromptVersions["tool_decision"] != "prompt.tool_decision.v1" ||
+		record.Config.SchemaVersions["tool_decision"] != structuredoutput.ToolDecisionSchemaVersion ||
+		record.Config.RouteVersions["tool_decision"] != "route.tool_decision.v1" {
+		t.Fatalf("stored failed run = %+v", record)
+	}
+}
+
+func TestToolLoopRunStoreRecordsToolExecutionFailure(t *testing.T) {
+	model := &toolLoopFailureModel{
+		decisionContent: `{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"sensitive-query"}}`,
+	}
+	tool := &errorToolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		err:        errors.New("sensitive tool backend failure"),
+	}
+	store := memory.NewMemoryStore()
+	input := toolLoopRunInput("run-store-tool-failure")
+	runtime := newToolLoopRunStoreRuntime(
+		t,
+		model,
+		tool,
+		store,
+		func(
+			_ context.Context,
+			input RunInput,
+			decision structuredoutput.ToolDecision,
+		) (runner.ToolCallRequest, error) {
+			return validToolLoopCallRequest(input, decision), nil
+		},
+	)
+
+	_, err := runtime.Run(context.Background(), input)
+	if !errors.Is(err, ErrToolExecutionFailed) {
+		t.Fatalf("Run() error = %v, want tool execution failure", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	wantTypes := []runstore.EventType{
+		runstore.EventRunStarted,
+		runstore.EventModelCall,
+		runstore.EventModelCall,
+		runstore.EventToolCall,
+		runstore.EventToolResult,
+		runstore.EventRunFailed,
+	}
+	assertToolLoopEventTypes(t, events, wantTypes)
+	if events[4].Status != string(tooling.ResultInternalError) ||
+		events[4].ErrorKind != "execution_failed" ||
+		events[4].ArgumentsDigest == "" ||
+		events[4].ResultDigest == "" {
+		t.Fatalf("tool execution failure event = %+v", events[4])
+	}
+	assertToolLoopEventsRedacted(
+		t,
+		events,
+		input.Query,
+		"sensitive-query",
+		"sensitive tool backend failure",
+	)
+
+	record, err := store.GetRun(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.Status != runstore.RunFailed ||
+		record.Config.ReleaseVersion != "v1" {
+		t.Fatalf("stored failed run = %+v", record)
+	}
+}
+
+func TestToolLoopRunStoreRecordsToolCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tool := &blockingToolLoopTestTool{
+		definition: toolLoopExecutionDefinition(),
+		started:    make(chan struct{}),
+	}
+	model := &toolLoopSequenceModel{
+		decisions: []string{
+			`{"should_call":true,"tool_name":"tool_loop_test","arguments":{"query":"sensitive-query"}}`,
+		},
+	}
+	store := memory.NewMemoryStore()
+	input := toolLoopRunInput("run-store-tool-canceled")
+	runtime := newToolLoopRunStoreRuntime(
+		t,
+		model,
+		tool,
+		store,
+		func(
+			_ context.Context,
+			input RunInput,
+			decision structuredoutput.ToolDecision,
+		) (runner.ToolCallRequest, error) {
+			return validToolLoopCallRequest(input, decision), nil
+		},
+	)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, runErr := runtime.Run(ctx, input)
+		errCh <- runErr
+	}()
+
+	select {
+	case <-tool.started:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("tool execution did not start")
+	}
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	wantTypes := []runstore.EventType{
+		runstore.EventRunStarted,
+		runstore.EventModelCall,
+		runstore.EventModelCall,
+		runstore.EventToolCall,
+		runstore.EventToolResult,
+		runstore.EventRunCanceled,
+	}
+	assertToolLoopEventTypes(t, events, wantTypes)
+	if events[4].Status != string(tooling.ResultInternalError) ||
+		events[4].ErrorKind != "canceled" ||
+		events[4].ArgumentsDigest == "" ||
+		events[4].ResultDigest == "" {
+		t.Fatalf("tool cancellation event = %+v", events[4])
+	}
+	assertToolLoopEventsRedacted(t, events, input.Query, "sensitive-query")
+
+	record, err := store.GetRun(context.Background(), input.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.Status != runstore.RunCanceled ||
+		record.Config.ReleaseVersion != "v1" {
+		t.Fatalf("stored canceled run = %+v", record)
 	}
 }
 
@@ -2008,6 +2443,22 @@ type blockingToolLoopTestTool struct {
 	started    chan struct{}
 }
 
+type errorToolLoopTestTool struct {
+	definition tooling.ToolDefinition
+	err        error
+}
+
+func (t *errorToolLoopTestTool) Definition() tooling.ToolDefinition {
+	return t.definition
+}
+
+func (t *errorToolLoopTestTool) Execute(
+	_ context.Context,
+	_ tooling.ToolExecutionRequest,
+) (tooling.ToolResult, error) {
+	return tooling.ToolResult{}, t.err
+}
+
 func (t *blockingToolLoopTestTool) Definition() tooling.ToolDefinition {
 	return t.definition
 }
@@ -2067,12 +2518,91 @@ func newToolLoopFailureRuntime(
 	return runtime
 }
 
+func newToolLoopRunStoreRuntime(
+	t *testing.T,
+	model ModelCaller,
+	tool tooling.Tool,
+	store runstore.Store,
+	authorizer ToolCallAuthorizer,
+) *ToolLoopRuntime {
+	t.Helper()
+	configStore := configregistry.NewRegistry()
+	if err := configStore.Publish(toolLoopSnapshot("v1")); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if err := configStore.Activate("v1"); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	selector, err := rollout.NewSelector(configStore, rollout.RolloutPolicy{
+		CandidateVersion: "v1",
+		Percentage:       100,
+	})
+	if err != nil {
+		t.Fatalf("NewSelector() error = %v", err)
+	}
+	toolRegistry := registry.NewToolRegistry()
+	if tool != nil {
+		if err := toolRegistry.Register(tool); err != nil {
+			t.Fatalf("Register() error = %v", err)
+		}
+	}
+	executor, err := runner.NewExecutor(toolRegistry)
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	runtime, err := NewToolLoopRuntime(ToolLoopConfig{
+		Registry:   configStore,
+		Selector:   selector,
+		Model:      model,
+		Executor:   executor,
+		Authorizer: authorizer,
+		RunStore:   store,
+	})
+	if err != nil {
+		t.Fatalf("NewToolLoopRuntime() error = %v", err)
+	}
+	return runtime
+}
+
 func toolLoopRunInput(runID string) RunInput {
 	return RunInput{
 		RequestID: "request-" + runID,
 		TenantID:  "tenant-a",
 		RunID:     runID,
 		Query:     "查询订单服务文档",
+	}
+}
+
+func assertToolLoopEventTypes(
+	t *testing.T,
+	events []runstore.RunEvent,
+	wantTypes []runstore.EventType,
+) {
+	t.Helper()
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events count = %d, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for index, wantType := range wantTypes {
+		if events[index].Type != wantType {
+			t.Fatalf("events[%d].Type = %q, want %q; events = %+v",
+				index, events[index].Type, wantType, events)
+		}
+	}
+}
+
+func assertToolLoopEventsRedacted(
+	t *testing.T,
+	events []runstore.RunEvent,
+	needles ...string,
+) {
+	t.Helper()
+	for _, event := range events {
+		eventText := fmt.Sprintf("%+v", event)
+		for _, needle := range needles {
+			if strings.Contains(eventText, needle) {
+				t.Fatalf("event contains sensitive content %q: %s", needle, eventText)
+			}
+		}
 	}
 }
 

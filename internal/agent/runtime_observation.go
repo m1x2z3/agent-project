@@ -9,11 +9,21 @@ import (
 	"agent-project/internal/modelgateway"
 )
 
-func (r *Runtime) observeExecution(execution *runtimeExecution, output RunOutput, runErr error) {
+func (r *Runtime) observeExecution(
+	ctx context.Context,
+	input RunInput,
+	execution *runtimeExecution,
+	output RunOutput,
+	runErr error,
+) {
 	if r == nil {
 		return
 	}
 	recordExecutionObservation(r.observer, execution, output, runErr)
+	if execution == nil || execution.shadow {
+		return
+	}
+	execution.recorder.finishRun(ctx, input, execution, runErr)
 }
 
 // recordExecutionObservation 提交一次 Run 的最终脱敏观测。

@@ -24,6 +24,8 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		selector:          cfg.Selector,
 		model:             cfg.Model,
 		observer:          observer,
+		runStore:          cfg.RunStore,
+		onStoreError:      cfg.OnStoreError,
 		analysisRepair:    cfg.AnalysisRepair,
 		finalAnswerRepair: cfg.FinalAnswerRepair,
 	}
@@ -56,8 +58,9 @@ func (r *Runtime) run(ctx context.Context, input RunInput, shadow bool) (RunOutp
 		return RunOutput{}, err
 	}
 	execution := &runtimeExecution{
-		started: time.Now(),
-		shadow:  shadow,
+		started:  time.Now(),
+		shadow:   shadow,
+		recorder: &runStoreRecorder{store: r.runStore, onError: r.onStoreError},
 		observation: RunObservation{
 			RequestID: input.RequestID,
 			TenantID:  input.TenantID,
@@ -73,7 +76,7 @@ func (r *Runtime) run(ctx context.Context, input RunInput, shadow bool) (RunOutp
 		runCtx = context.WithValue(runCtx, forcedReleaseContextKey{}, r.selectorCandidateVersion())
 	}
 	output, err := r.chain.Invoke(runCtx, input)
-	r.observeExecution(execution, output, err)
+	r.observeExecution(runCtx, input, execution, output, err)
 	return output, err
 }
 
