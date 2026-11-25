@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	cloneutil "agent-project/internal/clone"
 )
 
 // Registry 是进程内的配置版本注册中心。
@@ -299,10 +301,10 @@ func cloneSnapshot(snapshot ConfigSnapshot) ConfigSnapshot {
 	// 配置快照包含多个 map，仅复制外层结构是不够的。
 	// 这里复制所有 map，保证发布版本和 Run 快照不会被外部修改污染。
 	clone := snapshot
-	clone.Prompts = cloneMap(snapshot.Prompts)
-	clone.Schemas = cloneMap(snapshot.Schemas)
-	clone.Routes = cloneMap(snapshot.Routes)
-	clone.Pricing = cloneMap(snapshot.Pricing)
+	clone.Prompts = cloneutil.Map(snapshot.Prompts)
+	clone.Schemas = cloneutil.Map(snapshot.Schemas)
+	clone.Routes = cloneutil.Map(snapshot.Routes)
+	clone.Pricing = cloneutil.Map(snapshot.Pricing)
 	return clone
 }
 
@@ -310,15 +312,4 @@ func cloneRunSnapshot(snapshot RunSnapshot) RunSnapshot {
 	// RunSnapshot 还包含一层 ConfigSnapshot，因此需要继续复制内部配置 map。
 	snapshot.Snapshot = cloneSnapshot(snapshot.Snapshot)
 	return snapshot
-}
-
-func cloneMap[K comparable, V any](source map[K]V) map[K]V {
-	if source == nil {
-		return nil
-	}
-	target := make(map[K]V, len(source))
-	for key, value := range source {
-		target[key] = value
-	}
-	return target
 }

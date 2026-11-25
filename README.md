@@ -36,6 +36,7 @@
 │   └── server/          # HTTP 服务启动入口
 ├── internal/
 │   ├── agent/           # Agent Runtime 和 Eino 编排
+│   ├── clone/           # 不携带业务语义的通用可变数据复制
 │   ├── config/          # 环境变量和 .env 配置加载
 │   ├── configregistry/  # 配置版本、发布、回滚和 Run 快照
 │   ├── evaluation/      # 离线评测执行和报告
@@ -43,6 +44,7 @@
 │   ├── llm/             # OpenAI 兼容模型客户端和 SSE 解析
 │   ├── modelgateway/    # 供应商无关的模型路由
 │   ├── rollout/         # 灰度选择、影子运行和质量门禁
+│   ├── runstore/        # Run 记录、事件存储接口和内存实现
 │   ├── structuredoutput/ # 模型结构化输出、Schema 和语义校验
 │   └── tool/            # 工具契约、具体工具和注册中心
 │       ├── readtools/   # 只读工具实现
@@ -115,6 +117,13 @@ Prompt、Schema、模型路由和价格配置快照。`Publish` 与 `Activate` �
 创建新的发布版本而不是修改历史版本；`BindRun` 会把 Run 固定到创建时的 active
 版本，避免新配置污染历史执行。当前不提供 HTTP 管理接口、不保存 API Key，也不
 接入数据库，后续再扩展为持久化控制面。
+
+Run 记录和事件存储边界位于 `internal/runstore`。该包定义 Run 状态、配置版本引用、
+脱敏观测、执行事件和 `Store` 接口；`internal/runstore/memory` 提供线程安全的
+进程内实现。Run 只保存发布版本、Prompt、Schema、路由和价格版本号，不复制完整
+配置内容；事件只保存类型、状态、耗时、错误分类和参数或结果摘要，不保存完整
+Prompt、模型回答、工具参数、工具结果或 API Key。当前存储层尚未接入 Agent Runtime、
+HTTP 或数据库，进程重启后数据不会保留。
 
 Agent Runtime 位于 `internal/agent/runtime.go`，使用 Eino 的类型化 Runnable
 串联配置版本选择、Run 快照绑定、Prompt 渲染、两次模型调用和结构化结果校验。
