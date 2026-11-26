@@ -3,10 +3,10 @@ package agent
 import (
 	"context"
 	"errors"
-	"time"
 
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
+	"agent-project/internal/recording"
 )
 
 func (r *Runtime) observeExecution(
@@ -19,7 +19,7 @@ func (r *Runtime) observeExecution(
 	if r == nil {
 		return
 	}
-	recordExecutionObservation(r.observer, execution, output, runErr)
+	recordExecutionObservation(ctx, r.observer, execution, output, runErr)
 	if execution == nil || execution.shadow {
 		return
 	}
@@ -32,6 +32,7 @@ func (r *Runtime) observeExecution(
 // 也统一放在这里。observed 标记保证即使上层在成功或失败路径重复调用，
 // Observer 仍然只收到一次结果。
 func recordExecutionObservation(
+	ctx context.Context,
 	observer Observer,
 	execution *runtimeExecution,
 	output RunOutput,
@@ -47,7 +48,7 @@ func recordExecutionObservation(
 	}
 	// 观测只提交一次，避免 Chain 返回错误和上层重复处理时产生重复记录。
 	execution.observed = true
-	execution.observation.Duration = time.Since(execution.started)
+	execution.observation.Duration = recording.ClockFromContext(ctx).Now().Sub(execution.started)
 	execution.observation.Success = runErr == nil
 	execution.observation.StructuredValid = runErr == nil
 	if runErr != nil {
@@ -132,6 +133,13 @@ func estimateCost(
 
 func classifyRuntimeError(err error) string {
 	switch {
+	case errors.Is(err, ErrBudgetExceeded):
+		// 预算错误优先使用结构化原因，避免所有超限都退化为通用 runtime_error。
+		var violation BudgetViolation
+		if errors.As(err, &violation) && violation.Reason != "" {
+			return violation.Reason
+		}
+		return "budget_exceeded"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
@@ -157,6 +165,9 @@ func classifyRuntimeError(err error) string {
 	case errors.Is(err, ErrDuplicateToolCall):
 		// 重复调用表示模型循环没有产生新的执行意图，必须停止当前循环。
 		return "duplicate_tool_call"
+	case errors.Is(err, ErrLoopDetected):
+		// 非连续模型状态重复属于循环保护失败，不属于任何预算超限。
+		return "loop_detected"
 	case errors.Is(err, ErrMaxToolCallsExceeded):
 		// 达到工具调用上限表示循环被保护性终止。
 		return "max_tool_calls_exceeded"

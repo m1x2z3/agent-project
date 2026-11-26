@@ -17,6 +17,8 @@ var (
 	ErrMaxToolCallsExceeded = errors.New("agent maximum tool calls exceeded")
 	// ErrDuplicateToolCall 表示检测到相同工具、版本和参数的重复调用。
 	ErrDuplicateToolCall = errors.New("agent duplicate tool call")
+	// ErrLoopDetected 表示非连续的规范化决策状态再次出现，工具循环没有产生新进展。
+	ErrLoopDetected = errors.New("agent no-progress loop detected")
 	// ErrToolHistoryEncodingFailed 表示工具历史无法编码为下一轮模型输入。
 	ErrToolHistoryEncodingFailed = errors.New("agent tool history encoding failed")
 )

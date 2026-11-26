@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"agent-project/internal/recording"
 )
 
 // ValidateExecutionRequest 执行工具前检查工具定义、请求、令牌和副作用边界。
@@ -83,7 +85,7 @@ func Invoke(ctx context.Context, tool Tool, request ToolExecutionRequest) (ToolR
 		return ToolResult{}, ErrInvalidDefinition
 	}
 	definition := tool.Definition()
-	if err := ValidateExecutionRequest(definition, request, time.Now()); err != nil {
+	if err := ValidateExecutionRequest(definition, request, recording.ClockFromContext(ctx).Now()); err != nil {
 		return ToolResult{}, err
 	}
 	if err := ctx.Err(); err != nil {

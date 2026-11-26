@@ -7,6 +7,7 @@ import (
 
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
+	"agent-project/internal/recording"
 	"agent-project/internal/runstore"
 )
 
@@ -119,7 +120,7 @@ func (r *runStoreRecorder) recordModelCall(
 		RequestID:  input.RequestID,
 		TenantID:   input.TenantID,
 		Type:       runstore.EventModelCall,
-		OccurredAt: time.Now().UTC(),
+		OccurredAt: recording.ClockFromContext(ctx).Now().UTC(),
 		Provider:   provider,
 		Model:      model,
 		Status:     status,
@@ -151,7 +152,7 @@ func (r *runStoreRecorder) recordToolCall(
 		RequestID:       input.RequestID,
 		TenantID:        input.TenantID,
 		Type:            runstore.EventToolCall,
-		OccurredAt:      time.Now().UTC(),
+		OccurredAt:      recording.ClockFromContext(ctx).Now().UTC(),
 		ToolName:        toolName,
 		ToolVersion:     toolVersion,
 		Status:          "started",
@@ -189,7 +190,7 @@ func (r *runStoreRecorder) recordToolResult(
 		RequestID:       input.RequestID,
 		TenantID:        input.TenantID,
 		Type:            runstore.EventToolResult,
-		OccurredAt:      time.Now().UTC(),
+		OccurredAt:      recording.ClockFromContext(ctx).Now().UTC(),
 		ToolName:        toolName,
 		ToolVersion:     toolVersion,
 		Status:          status,
@@ -224,12 +225,20 @@ func (r *runStoreRecorder) finishRun(
 		RequestID:  input.RequestID,
 		TenantID:   input.TenantID,
 		Type:       eventType,
-		OccurredAt: time.Now().UTC(),
+		OccurredAt: recording.ClockFromContext(ctx).Now().UTC(),
 		Provider:   observation.Provider,
 		Model:      observation.Model,
 		Status:     string(status),
 		DurationMS: observation.Duration.Milliseconds(),
 		ErrorKind:  observation.ErrorKind,
+	}
+	var violation BudgetViolation
+	if errors.As(runErr, &violation) {
+		// 终止事件只保存预算来源、限额和实际消耗，错误原因沿用 ErrorKind，
+		// 不记录 Prompt、模型响应、工具参数或底层供应商错误文本。
+		event.BudgetScope = string(violation.Scope)
+		event.BudgetLimit = violation.Limit
+		event.BudgetUsed = violation.Used
 	}
 	// 结束阶段要尽量保留，即使结束事件因为存储异常没有写成功，
 	// 因此两个 Store 操作分别执行并分别通知失败。
@@ -264,7 +273,7 @@ func snapshotRunObservation(execution *runtimeExecution) runstore.RunObservation
 	}
 	execution.mu.Lock()
 	defer execution.mu.Unlock()
-	return runstore.RunObservation{
+	observation := runstore.RunObservation{
 		Provider:         execution.observation.Provider,
 		Model:            execution.observation.Model,
 		Duration:         execution.observation.Duration,
@@ -276,6 +285,22 @@ func snapshotRunObservation(execution *runtimeExecution) runstore.RunObservation
 		Cost:             execution.observation.Cost,
 		ErrorKind:        execution.observation.ErrorKind,
 	}
+	if execution.budget != nil {
+		budget := execution.budget
+		observation.MaxSteps = budget.effective.Limits.MaxSteps
+		observation.MaxToolCalls = budget.effective.Limits.MaxToolCalls
+		observation.MaxTotalTokens = int64(budget.effective.Limits.MaxTotalTokens)
+		observation.MaxDurationMS = budget.effective.Limits.MaxDuration.Milliseconds()
+		observation.Steps = budget.steps
+		observation.ToolCalls = budget.toolCalls
+		observation.BudgetTokens = budget.totalTokens
+		observation.EstimatedTokens = budget.estimatedTokens
+		observation.StepsSource = string(budget.effective.StepsSource)
+		observation.ToolCallsSource = string(budget.effective.ToolCallsSource)
+		observation.TokensSource = string(budget.effective.TokensSource)
+		observation.DurationSource = string(budget.effective.DurationSource)
+	}
+	return observation
 }
 
 // classifyRunCompletion 把 Runtime 结果映射为 RunStore 的生命周期状态和结束事件。
@@ -286,6 +311,8 @@ func classifyRunCompletion(err error) (runstore.RunStatus, runstore.EventType) {
 	switch {
 	case err == nil:
 		return runstore.RunSucceeded, runstore.EventRunSucceeded
+	case errors.Is(err, ErrBudgetExceeded):
+		return runstore.RunBudgetExceeded, runstore.EventRunBudgetExceeded
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return runstore.RunCanceled, runstore.EventRunCanceled
 	default:

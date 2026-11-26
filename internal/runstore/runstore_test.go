@@ -66,6 +66,7 @@ func TestEventTypeValuesAreStableAndUnique(t *testing.T) {
 		{name: "tool result", event: EventToolResult, want: "tool.result"},
 		{name: "run succeeded", event: EventRunSucceeded, want: "run.succeeded"},
 		{name: "run failed", event: EventRunFailed, want: "run.failed"},
+		{name: "run budget exceeded", event: EventRunBudgetExceeded, want: "run.budget_exceeded"},
 		{name: "run canceled", event: EventRunCanceled, want: "run.canceled"},
 	}
 
@@ -146,6 +147,7 @@ func TestRunStatusValuesAreStable(t *testing.T) {
 		{name: "running", status: RunRunning, want: "running"},
 		{name: "succeeded", status: RunSucceeded, want: "succeeded"},
 		{name: "failed", status: RunFailed, want: "failed"},
+		{name: "budget exceeded", status: RunBudgetExceeded, want: "budget_exceeded"},
 		{name: "canceled", status: RunCanceled, want: "canceled"},
 	}
 

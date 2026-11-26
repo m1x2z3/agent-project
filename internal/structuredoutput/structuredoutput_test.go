@@ -218,12 +218,13 @@ func TestRepairFailureAndRejectedRepairDoNotRetry(t *testing.T) {
 		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
 
+	expected := errors.New("repair provider failed")
 	options.Repair = func(context.Context, RepairRequest) ([]byte, error) {
 		calls.Add(1)
-		return nil, errors.New("repair provider failed")
+		return nil, expected
 	}
 	_, _, err = DecodeTaskAnalysis(context.Background(), []byte(`bad`), options)
-	if !errors.Is(err, ErrRepairFailed) || calls.Load() != 2 {
+	if !errors.Is(err, ErrRepairFailed) || !errors.Is(err, expected) || calls.Load() != 2 {
 		t.Fatalf("repair failure = %v, calls = %d", err, calls.Load())
 	}
 }

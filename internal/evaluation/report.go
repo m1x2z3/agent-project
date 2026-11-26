@@ -41,7 +41,7 @@ func RenderMarkdown(report Report) string {
 		report.Demo.GateAction, report.Demo.GateReason)
 	fmt.Fprintf(&builder, "- 回滚版本：`%s`，PreviousVersion：`%s`，RollbackFrom：`%s`\n",
 		report.Demo.RollbackVersion, report.Demo.PreviousVersion, report.Demo.RollbackFrom)
-	fmt.Fprintf(&builder, "- 历史重放结果一致：`%t`\n", report.Demo.ReplayMatch)
+	fmt.Fprintf(&builder, "- 历史配置重跑的版本引用一致：`%t`\n", report.Demo.RerunConfigMatch)
 	builder.WriteString("\n历史版本顺序：")
 	if len(report.Demo.HistoryVersions) == 0 {
 		builder.WriteString("无\n")
@@ -55,7 +55,7 @@ func RenderMarkdown(report Report) string {
 	builder.WriteString("- 候选版本的失败由 Fake Provider 受控注入，用于验证发布阻断和回滚，不代表真实 DeepSeek 或 Kimi 的输出质量。\n")
 	builder.WriteString("- 当前 `.env` 使用单供应商兼容配置，本日没有执行真实双供应商调用。\n")
 	builder.WriteString("- 报告只保存指标、错误分类、版本关系和输出摘要哈希，不保存完整 Prompt、模型回答、API Key 或供应商原始错误。\n")
-	builder.WriteString("- 历史重放使用确定性 Fake Provider；真实模型重新调用仍然属于非确定性比较，不能等同于确定性重放。\n")
+	builder.WriteString("- 历史配置重跑使用确定性 Fake Provider，只验证相同配置下的版本引用；它属于 rerun/config comparison，不是消费录制依赖的确定性 replay。真实模型重跑仍不保证结果一致。\n")
 	builder.WriteString("- 当前发布、灰度和回滚均为进程内演示，尚未接入数据库、HTTP 管理接口或自动化发布系统。\n")
 	return builder.String()
 }

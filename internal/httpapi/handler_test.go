@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,60 @@ import (
 
 	"agent-project/internal/llm"
 )
+
+// TestNewHandlerRandomSource 验证系统默认值、显式注入和旧构造方式兼容。
+func TestNewHandlerRandomSource(t *testing.T) {
+	if handler := NewHandler(nil, nil); handler.random != rand.Reader {
+		t.Fatal("NewHandler() did not default to crypto/rand.Reader")
+	}
+	injected := bytes.NewReader([]byte{0x01})
+	if handler := NewHandler(nil, nil, injected); handler.random != injected {
+		t.Fatal("NewHandler() did not retain injected random source")
+	}
+	if handler := NewHandler(nil, nil, nil, injected); handler.random != injected {
+		t.Fatal("NewHandler() did not select the first non-nil random source")
+	}
+}
+
+// TestNewRequestIDUsesInjectedRandomSource 验证明确字节序列、无参数兼容和失败回退。
+func TestNewRequestIDUsesInjectedRandomSource(t *testing.T) {
+	randomBytes := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}
+	const want = "req-0001020304050607"
+	if got := newRequestID(bytes.NewReader(randomBytes)); got != want {
+		t.Fatalf("newRequestID(injected) = %q, want %q", got, want)
+	}
+	if got := newRequestID(bytes.NewReader(randomBytes)); got != want {
+		t.Fatalf("second newRequestID(injected) = %q, want %q", got, want)
+	}
+	if got := newRequestID(); !strings.HasPrefix(got, "req-") {
+		t.Fatalf("newRequestID() = %q, want existing req- prefix", got)
+	}
+	if got := newRequestID(bytes.NewReader([]byte{0x01})); !strings.HasPrefix(got, "req-") || got == want {
+		t.Fatalf("newRequestID(short source) = %q, want timestamp fallback", got)
+	}
+}
+
+// TestHandlerRequestIDUsesInjectedRandomSource 验证 HTTP Header 使用注入字节且接口路径不变。
+func TestHandlerRequestIDUsesInjectedRandomSource(t *testing.T) {
+	randomBytes := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}
+	const want = "req-0001020304050607"
+	serve := func() string {
+		handler := NewHandler(nil, nil, bytes.NewReader(randomBytes))
+		request := httptest.NewRequest(http.MethodGet, "/health", nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET /health status = %d, want 200", response.Code)
+		}
+		return response.Header().Get("X-Request-ID")
+	}
+	if got := serve(); got != want {
+		t.Fatalf("X-Request-ID = %q, want %q", got, want)
+	}
+	if got := serve(); got != want {
+		t.Fatalf("repeated X-Request-ID = %q, want deterministic %q", got, want)
+	}
+}
 
 func TestHandlerHealth(t *testing.T) {
 	handler := NewHandler(&fakeChatClient{}, slog.New(slog.NewTextHandler(io.Discard, nil)))

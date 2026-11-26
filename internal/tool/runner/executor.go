@@ -2,8 +2,8 @@ package runner
 
 import (
 	"context"
-	"time"
 
+	"agent-project/internal/recording"
 	"agent-project/internal/tool/registry"
 	"agent-project/internal/tool/tooling"
 )
@@ -35,11 +35,11 @@ func NewExecutor(toolRegistry *registry.ToolRegistry) (*Executor, error) {
 // 工具版本必须由可信调用方显式提供，不能根据模型输出或注册中心中的版本
 // 列表自动推断。该方法只完成“请求校验 + 工具发现”，不会编码参数，也不会
 // 调用 tooling.Invoke 或 Tool.Execute。
-func (e *Executor) resolveTool(request ToolCallRequest) (registry.RegisteredTool, error) {
+func (e *Executor) resolveTool(ctx context.Context, request ToolCallRequest) (registry.RegisteredTool, error) {
 	if e == nil || e.registry == nil {
 		return registry.RegisteredTool{}, ErrExecutorNotConfigured
 	}
-	if err := request.Validate(time.Now()); err != nil {
+	if err := request.Validate(recording.ClockFromContext(ctx).Now()); err != nil {
 		return registry.RegisteredTool{}, err
 	}
 	return e.registry.Resolve(request.Decision.ToolName, request.ToolVersion)
@@ -59,7 +59,7 @@ func (e *Executor) Execute(
 			return tooling.ToolResult{}, err
 		}
 	}
-	resolvedTool, err := e.resolveTool(request)
+	resolvedTool, err := e.resolveTool(ctx, request)
 	if err != nil {
 		return tooling.ToolResult{}, err
 	}

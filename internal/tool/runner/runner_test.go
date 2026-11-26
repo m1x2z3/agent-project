@@ -232,7 +232,7 @@ func TestExecutorResolvesToolFromRequest(t *testing.T) {
 	}
 
 	request := validToolCallRequest(time.Now().Add(time.Hour))
-	registered, err := executor.resolveTool(request)
+	registered, err := executor.resolveTool(context.Background(), request)
 	if err != nil {
 		t.Fatalf("resolveTool() error = %v", err)
 	}
@@ -258,14 +258,14 @@ func TestExecutorResolveToolRejectsUnknownToolAndVersion(t *testing.T) {
 	unknownTool := validToolCallRequest(time.Now().Add(time.Hour))
 	unknownTool.Decision.ToolName = "unknown_tool"
 	unknownTool.CapabilityToken.ToolName = "unknown_tool"
-	if _, err := executor.resolveTool(unknownTool); !errors.Is(err, registry.ErrToolNotFound) {
+	if _, err := executor.resolveTool(context.Background(), unknownTool); !errors.Is(err, registry.ErrToolNotFound) {
 		t.Fatalf("unknown tool error = %v, want ErrToolNotFound", err)
 	}
 
 	unknownVersion := validToolCallRequest(time.Now().Add(time.Hour))
 	unknownVersion.ToolVersion = "v2"
 	unknownVersion.CapabilityToken.ToolVersion = "v2"
-	if _, err := executor.resolveTool(unknownVersion); !errors.Is(err, registry.ErrToolVersionNotFound) {
+	if _, err := executor.resolveTool(context.Background(), unknownVersion); !errors.Is(err, registry.ErrToolVersionNotFound) {
 		t.Fatalf("unknown version error = %v, want ErrToolVersionNotFound", err)
 	}
 }
@@ -281,7 +281,7 @@ func TestExecutorResolveToolDoesNotExecuteTool(t *testing.T) {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
 
-	if _, err := executor.resolveTool(validToolCallRequest(time.Now().Add(time.Hour))); err != nil {
+	if _, err := executor.resolveTool(context.Background(), validToolCallRequest(time.Now().Add(time.Hour))); err != nil {
 		t.Fatalf("resolveTool() error = %v", err)
 	}
 	if tool.executeCalls != 0 {

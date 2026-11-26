@@ -9,7 +9,7 @@ import (
 	"agent-project/internal/rollout"
 )
 
-// RunReleaseDemo 演示发布、灰度、影子运行、门禁、回滚和历史重放。
+// RunReleaseDemo 演示发布、灰度、影子运行、门禁、回滚和历史配置重跑比较。
 //
 // 演示使用确定性 Fake Provider，不访问真实模型服务。
 func RunReleaseDemo(ctx context.Context, testCase Case, candidateSummary Summary) (DemoResult, error) {
@@ -107,11 +107,11 @@ func RunReleaseDemo(ctx context.Context, testCase Case, candidateSummary Summary
 		demo.HistoryVersions = append(demo.HistoryVersions, metadata.Version)
 	}
 
-	replay, replayErr := replayHistoricalRun(ctx, registry, testCase)
-	if replayErr != nil {
-		return DemoResult{}, replayErr
+	rerun, rerunErr := rerunHistoricalRun(ctx, registry, testCase)
+	if rerunErr != nil {
+		return DemoResult{}, rerunErr
 	}
-	demo.ReplayMatch = replay
+	demo.RerunConfigMatch = rerun
 	return demo, nil
 }
 
@@ -127,19 +127,22 @@ func newSharedRuntime(
 	})
 }
 
-func replayHistoricalRun(ctx context.Context, registry *configregistry.Registry, testCase Case) (bool, error) {
+// rerunHistoricalRun 使用原配置快照和确定性 Fake 再执行一次 Runtime。
+// 它只比较本次输出引用的配置版本，属于 rerun/config comparison；没有消费原 Run
+// 的录制时间、随机数、模型响应或工具结果，因此不能作为确定性 replay 的证据。
+func rerunHistoricalRun(ctx context.Context, registry *configregistry.Registry, testCase Case) (bool, error) {
 	snapshot, err := registry.Get("v1")
 	if err != nil {
 		return false, err
 	}
-	replayRegistry := configregistry.NewRegistry()
-	if err := replayRegistry.Publish(snapshot); err != nil {
+	rerunRegistry := configregistry.NewRegistry()
+	if err := rerunRegistry.Publish(snapshot); err != nil {
 		return false, err
 	}
-	if err := replayRegistry.Activate("v1"); err != nil {
+	if err := rerunRegistry.Activate("v1"); err != nil {
 		return false, err
 	}
-	selector, err := rollout.NewSelector(replayRegistry, rollout.RolloutPolicy{
+	selector, err := rollout.NewSelector(rerunRegistry, rollout.RolloutPolicy{
 		CandidateVersion: "v1",
 		Percentage:       100,
 	})
@@ -147,7 +150,7 @@ func replayHistoricalRun(ctx context.Context, registry *configregistry.Registry,
 		return false, err
 	}
 	runtime, err := newSharedRuntime(
-		replayRegistry,
+		rerunRegistry,
 		selector,
 		NewOfflineModel("deepseek", testCase, false),
 	)
@@ -155,9 +158,9 @@ func replayHistoricalRun(ctx context.Context, registry *configregistry.Registry,
 		return false, err
 	}
 	output, runErr := runtime.Run(ctx, agent.RunInput{
-		RequestID: "demo-replay",
+		RequestID: "demo-rerun",
 		TenantID:  "normal-tenant",
-		RunID:     "demo-replay-run",
+		RunID:     "demo-rerun-run",
 		Query:     testCase.Query,
 	})
 	if runErr != nil {

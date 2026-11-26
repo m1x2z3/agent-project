@@ -21,6 +21,17 @@ import (
 	"agent-project/internal/tool/tooling"
 )
 
+// newToolLoopTestExecution 为直接调用工具循环阶段的测试创建默认执行账本。
+func newToolLoopTestExecution(t *testing.T) *runtimeExecution {
+	t.Helper()
+	started := time.Now()
+	budget, err := newBudgetController(BudgetSet{}, started)
+	if err != nil {
+		t.Fatalf("newBudgetController() error = %v", err)
+	}
+	return &runtimeExecution{started: started, budget: budget}
+}
+
 func TestToolCallRecordStoresOnlyExecutionSummary(t *testing.T) {
 	record := ToolCallRecord{
 		ToolName:        "search_project_docs",
@@ -1166,7 +1177,9 @@ func TestToolLoopRunStopsAtMaximumToolCalls(t *testing.T) {
 	) (runner.ToolCallRequest, error) {
 		return validToolLoopCallRequest(input, decision), nil
 	})
-	runtime.maxCalls = 1
+	runtime.budgetResolver = FixedBudgetResolver{Budgets: BudgetSet{
+		Run: BudgetLimits{MaxToolCalls: 1},
+	}}
 
 	_, err := runtime.Run(context.Background(), toolLoopRunInput("run-max-calls"))
 	if !errors.Is(err, ErrMaxToolCallsExceeded) {
@@ -1627,7 +1640,8 @@ func TestToolLoopCallToolDecisionModelWrapsModelError(t *testing.T) {
 		model: &fakeRuntimeModel{err: expected},
 	}
 	state := toolLoopState{
-		snapshot: toolLoopSnapshot("v1"),
+		snapshot:  toolLoopSnapshot("v1"),
+		execution: newToolLoopTestExecution(t),
 	}
 	_, err := runtime.callToolDecisionModel(context.Background(), state)
 	if !errors.Is(err, ErrToolDecisionModelFailed) || !errors.Is(err, expected) {
@@ -1678,13 +1692,16 @@ func TestToolLoopDecodeToolDecisionUsesRepairOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewToolLoopRuntime() error = %v", err)
 	}
+	execution := newToolLoopTestExecution(t)
 	state := toolLoopState{
-		snapshot: toolLoopSnapshot("v1"),
+		snapshot:  toolLoopSnapshot("v1"),
+		execution: execution,
 		toolDecisionResponse: modelgateway.ChatResponse{
 			Message: modelgateway.Message{Content: `{"should_call":true}`},
 		},
 	}
-	state, err = runtime.decodeToolDecision(context.Background(), state)
+	ctx := context.WithValue(context.Background(), executionContextKey{}, execution)
+	state, err = runtime.decodeToolDecision(ctx, state)
 	if err != nil {
 		t.Fatalf("decodeToolDecision() error = %v", err)
 	}
@@ -2103,6 +2120,7 @@ func TestToolLoopExecuteToolAppendsSuccessfulResultToHistory(t *testing.T) {
 		toolDecision:        request.Decision,
 		toolCallRequest:     request,
 		toolArgumentsDigest: digest,
+		execution:           newToolLoopTestExecution(t),
 	})
 	if err != nil {
 		t.Fatalf("executeTool() error = %v", err)
@@ -2145,6 +2163,7 @@ func TestToolLoopExecuteToolKeepsBusinessFailureForNextRound(t *testing.T) {
 	state, err := runtime.executeTool(context.Background(), toolLoopState{
 		toolDecision:    request.Decision,
 		toolCallRequest: request,
+		execution:       newToolLoopTestExecution(t),
 	})
 	if err != nil {
 		t.Fatalf("executeTool() error = %v", err)
@@ -2167,6 +2186,7 @@ func TestToolLoopExecuteToolClassifiesExecutionBoundaryError(t *testing.T) {
 	state, err := runtime.executeTool(context.Background(), toolLoopState{
 		toolDecision:    request.Decision,
 		toolCallRequest: request,
+		execution:       newToolLoopTestExecution(t),
 	})
 	if !errors.Is(err, ErrToolExecutionFailed) || !errors.Is(err, registry.ErrToolNotFound) {
 		t.Fatalf("executeTool() error = %v, want execution and not-found errors", err)
@@ -2202,13 +2222,25 @@ func TestToolLoopExecuteToolStopsAtMaximumWithoutCallingExecutor(t *testing.T) {
 	tool := &toolLoopTestTool{definition: toolLoopExecutionDefinition()}
 	runtime := &ToolLoopRuntime{
 		executor: newToolLoopTestExecutor(t, tool),
-		maxCalls: 1,
 	}
 	request := toolLoopExecutionRequest()
+	execution := newToolLoopTestExecution(t)
+	budget, err := newBudgetController(BudgetSet{
+		Run: BudgetLimits{MaxToolCalls: 1},
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("newBudgetController() error = %v", err)
+	}
+	execution.budget = budget
+	// 先结算一次历史工具调用，使下一次执行在统一控制器中达到次数上限。
+	if err := budget.BeginToolCall(time.Now()); err != nil {
+		t.Fatalf("BeginToolCall() error = %v", err)
+	}
 
-	_, err := runtime.executeTool(context.Background(), toolLoopState{
+	_, err = runtime.executeTool(context.Background(), toolLoopState{
 		toolDecision:    request.Decision,
 		toolCallRequest: request,
+		execution:       execution,
 		toolHistory: []toolHistoryEntry{{
 			Record: ToolCallRecord{
 				ToolName:    "previous-tool",
@@ -2524,6 +2556,7 @@ func newToolLoopRunStoreRuntime(
 	tool tooling.Tool,
 	store runstore.Store,
 	authorizer ToolCallAuthorizer,
+	analysisRepairs ...structuredoutput.RepairFunc,
 ) *ToolLoopRuntime {
 	t.Helper()
 	configStore := configregistry.NewRegistry()
@@ -2550,13 +2583,18 @@ func newToolLoopRunStoreRuntime(
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
+	var analysisRepair structuredoutput.RepairFunc
+	if len(analysisRepairs) > 0 {
+		analysisRepair = analysisRepairs[0]
+	}
 	runtime, err := NewToolLoopRuntime(ToolLoopConfig{
-		Registry:   configStore,
-		Selector:   selector,
-		Model:      model,
-		Executor:   executor,
-		Authorizer: authorizer,
-		RunStore:   store,
+		Registry:       configStore,
+		Selector:       selector,
+		Model:          model,
+		Executor:       executor,
+		Authorizer:     authorizer,
+		RunStore:       store,
+		AnalysisRepair: analysisRepair,
 	})
 	if err != nil {
 		t.Fatalf("NewToolLoopRuntime() error = %v", err)
@@ -2803,7 +2841,8 @@ func TestToolLoopContinueToolDecisionReturnsToolResultToModel(t *testing.T) {
 		input: RunInput{
 			Query: "查询订单服务文档",
 		},
-		snapshot: toolLoopSnapshot("v1"),
+		snapshot:  toolLoopSnapshot("v1"),
+		execution: newToolLoopTestExecution(t),
 		analysis: structuredoutput.TaskAnalysis{
 			Summary:    "需要查询项目文档",
 			Confidence: 0.8,
@@ -2915,7 +2954,7 @@ func TestToolLoopRenderFinalPromptStopsWhenContextIsCanceled(t *testing.T) {
 func TestToolLoopCallFinalModelUsesSnapshotRoute(t *testing.T) {
 	model := &fakeRuntimeModel{}
 	runtime := &ToolLoopRuntime{model: model}
-	execution := &runtimeExecution{}
+	execution := newToolLoopTestExecution(t)
 
 	state, err := runtime.callToolLoopFinalModel(context.Background(), toolLoopState{
 		snapshot:    toolLoopSnapshot("v1"),
@@ -2948,6 +2987,7 @@ func TestToolLoopCallFinalModelWrapsModelError(t *testing.T) {
 
 	_, err := runtime.callToolLoopFinalModel(context.Background(), toolLoopState{
 		snapshot:    toolLoopSnapshot("v1"),
+		execution:   newToolLoopTestExecution(t),
 		finalPrompt: "最终回答",
 	})
 	if !errors.Is(err, ErrFinalModelFailed) || !errors.Is(err, expected) {

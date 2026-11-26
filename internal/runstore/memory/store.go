@@ -5,9 +5,9 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"time"
 
 	"agent-project/internal/clone"
+	"agent-project/internal/recording"
 	"agent-project/internal/runstore"
 )
 
@@ -101,6 +101,7 @@ func (s *MemoryStore) AppendEvent(ctx context.Context, event runstore.RunEvent) 
 		runstore.EventToolResult,
 		runstore.EventRunSucceeded,
 		runstore.EventRunFailed,
+		runstore.EventRunBudgetExceeded,
 		runstore.EventRunCanceled:
 	default:
 		return runstore.ErrInvalidEventType
@@ -128,8 +129,8 @@ func (s *MemoryStore) AppendEvent(ctx context.Context, event runstore.RunEvent) 
 
 // FinishRun 结束一条仍处于 running 状态的 Run。
 //
-// 只有 succeeded、failed 和 canceled 可以作为结束状态。方法会统一写入
-// 当前 UTC 时间，并保存最终脱敏观测；已经结束的 Run 不能重复完成。
+// 只有 succeeded、failed、budget_exceeded 和 canceled 可以作为结束状态。
+// 方法会使用当前请求 Clock 的 UTC 时间，并保存最终脱敏观测；已经结束的 Run 不能重复完成。
 func (s *MemoryStore) FinishRun(
 	ctx context.Context,
 	runID string,
@@ -145,7 +146,7 @@ func (s *MemoryStore) FinishRun(
 		return runstore.ErrInvalidRun
 	}
 	switch status {
-	case runstore.RunSucceeded, runstore.RunFailed, runstore.RunCanceled:
+	case runstore.RunSucceeded, runstore.RunFailed, runstore.RunBudgetExceeded, runstore.RunCanceled:
 	default:
 		return runstore.ErrInvalidStateTransition
 	}
@@ -161,7 +162,7 @@ func (s *MemoryStore) FinishRun(
 		return runstore.ErrRunAlreadyFinished
 	}
 	record.Status = status
-	record.FinishedAt = time.Now().UTC()
+	record.FinishedAt = recording.ClockFromContext(ctx).Now().UTC()
 	record.Observation = observation
 	s.runs[runID] = record
 	return nil

@@ -94,7 +94,7 @@ type RuntimeFactory func(
 	observer agent.Observer,
 ) (RuntimeHandle, error)
 
-// DemoResult 保存发布、灰度、影子运行和回滚演示的脱敏结果。
+// DemoResult 保存发布、灰度、影子运行、回滚和历史配置重跑比较的脱敏结果。
 type DemoResult struct {
 	MainReleaseVersion   string
 	MainSuccess          bool
@@ -110,7 +110,7 @@ type DemoResult struct {
 	PreviousVersion      string
 	RollbackFrom         string
 	HistoryVersions      []string
-	ReplayMatch          bool
+	RerunConfigMatch     bool // 表示使用原配置重跑后，输出引用的配置版本是否一致；不表示确定性依赖重放。
 }
 
 // Report 是评测命令最终渲染为 Markdown 的完整数据。

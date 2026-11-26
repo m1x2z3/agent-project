@@ -17,7 +17,8 @@ const (
 	// EventRunSucceeded 表示 Run 成功结束。
 	EventRunSucceeded EventType = "run.succeeded"
 	// EventRunFailed 表示 Run 因错误结束。
-	EventRunFailed EventType = "run.failed"
+	EventRunFailed         EventType = "run.failed"
+	EventRunBudgetExceeded EventType = "run.budget_exceeded" // 表示 Run 因预算超限进入确定性终态。
 	// EventRunCanceled 表示 Run 因 Context 取消或主动取消而结束。
 	EventRunCanceled EventType = "run.canceled"
 )
@@ -43,4 +44,7 @@ type RunEvent struct {
 	ErrorKind       string
 	ArgumentsDigest string
 	ResultDigest    string
+	BudgetScope     string // 保存触发预算终止的限额来源作用域。
+	BudgetLimit     int64  // 保存触发终止的生效限额；时间预算使用毫秒。
+	BudgetUsed      int64  // 保存触发终止时的实际消耗；时间预算使用毫秒。
 }

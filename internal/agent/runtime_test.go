@@ -65,7 +65,8 @@ func TestRuntimeRunsVersionedChainAndObservesMetadata(t *testing.T) {
 		model.requests[1].Model != "fake-final_answer" ||
 		model.requests[0].Temperature == nil ||
 		*model.requests[0].Temperature != 0 ||
-		model.requests[0].MaxTokens != nil ||
+		model.requests[0].MaxTokens == nil ||
+		*model.requests[0].MaxTokens != defaultBudgetLimits().MaxTotalTokens ||
 		model.requests[0].Timeout != time.Second {
 		t.Fatalf("route options were not propagated: %+v", model.requests)
 	}

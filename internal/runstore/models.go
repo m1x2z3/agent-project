@@ -11,7 +11,8 @@ const (
 	// RunSucceeded 表示 Run 已成功完成。
 	RunSucceeded RunStatus = "succeeded"
 	// RunFailed 表示 Run 因错误结束。
-	RunFailed RunStatus = "failed"
+	RunFailed         RunStatus = "failed"
+	RunBudgetExceeded RunStatus = "budget_exceeded" // 表示 Run 因任一预算超限而确定性终止。
 	// RunCanceled 表示 Run 因 Context 取消或主动取消结束。
 	RunCanceled RunStatus = "canceled"
 )
@@ -44,6 +45,18 @@ type RunObservation struct {
 	TotalTokens      int
 	Cost             float64
 	ErrorKind        string
+	MaxSteps         int    // 保存本次 Run 合并后的最大执行步数。
+	MaxToolCalls     int    // 保存本次 Run 合并后的最大工具调用次数。
+	MaxTotalTokens   int64  // 保存本次 Run 合并后的预算 Token 上限。
+	MaxDurationMS    int64  // 保存本次 Run 合并后的总时间上限，统一使用毫秒。
+	Steps            int64  // 保存已经进入执行边界的模型、工具和修复步数。
+	ToolCalls        int64  // 保存已经进入执行边界的工具调用次数。
+	BudgetTokens     int64  // 保存预算账本累计 Token，包含真实 Usage 和本地估算。
+	EstimatedTokens  int64  // 保存预算 Token 中来自本地估算的部分，不代表供应商真实用量。
+	StepsSource      string // 保存最大步数限制的来源作用域，不包含用户或租户额外信息。
+	ToolCallsSource  string // 保存工具调用次数限制的来源作用域。
+	TokensSource     string // 保存预算 Token 上限的来源作用域。
+	DurationSource   string // 保存总时间预算限制的来源作用域。
 }
 
 // RunRecord 是一次 Agent Run 的持久化领域记录。

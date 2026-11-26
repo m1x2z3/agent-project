@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
+	"agent-project/internal/recording"
+	"agent-project/internal/structuredoutput"
 	"github.com/cloudwego/eino/compose"
 )
 
@@ -19,15 +21,38 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if observer == nil {
 		observer = noopObserver{}
 	}
+	// Repair 在构造时绑定一次，实际执行时再从 Context 获取当前 Run 的独立账本。
+	// 保留原始回调变量，避免包装后的闭包意外递归调用自身。
+	analysisRepair := cfg.AnalysisRepair
+	if analysisRepair != nil {
+		original := analysisRepair
+		analysisRepair = func(
+			ctx context.Context,
+			request structuredoutput.RepairRequest,
+		) ([]byte, error) {
+			return budgetedRepair(executionFromContext(ctx), original)(ctx, request)
+		}
+	}
+	finalAnswerRepair := cfg.FinalAnswerRepair
+	if finalAnswerRepair != nil {
+		original := finalAnswerRepair
+		finalAnswerRepair = func(
+			ctx context.Context,
+			request structuredoutput.RepairRequest,
+		) ([]byte, error) {
+			return budgetedRepair(executionFromContext(ctx), original)(ctx, request)
+		}
+	}
 	runtime := &Runtime{
 		registry:          cfg.Registry,
 		selector:          cfg.Selector,
 		model:             cfg.Model,
+		budgetResolver:    cfg.BudgetResolver,
 		observer:          observer,
 		runStore:          cfg.RunStore,
 		onStoreError:      cfg.OnStoreError,
-		analysisRepair:    cfg.AnalysisRepair,
-		finalAnswerRepair: cfg.FinalAnswerRepair,
+		analysisRepair:    analysisRepair,
+		finalAnswerRepair: finalAnswerRepair,
 	}
 	chain, err := runtime.buildChain(context.Background())
 	if err != nil {
@@ -57,8 +82,36 @@ func (r *Runtime) run(ctx context.Context, input RunInput, shadow bool) (RunOutp
 	if err := validateRunInput(input); err != nil {
 		return RunOutput{}, err
 	}
+
+	started := recording.ClockFromContext(ctx).Now()
+	budgetSet := BudgetSet{}
+	var err error
+	if r.budgetResolver != nil {
+		budgetSet, err = r.budgetResolver.Resolve(ctx, input)
+		if err != nil {
+			return RunOutput{}, err
+		}
+	}
+	budget, err := newBudgetController(budgetSet, started)
+	if err != nil {
+		return RunOutput{}, err
+	}
+	// 只有配置用户级预算时才强制要求可信用户身份，保持现有无用户预算调用兼容。
+	if budgetSet.User != (BudgetLimits{}) && strings.TrimSpace(input.UserID) == "" {
+		return RunOutput{}, ErrInvalidRunInput
+	}
+	budgetCause := BudgetViolation{
+		Scope:  budget.effective.DurationSource,
+		Reason: "total_time_budget_exceeded",
+		Limit:  budget.effective.Limits.MaxDuration.Milliseconds(),
+		Used:   budget.effective.Limits.MaxDuration.Milliseconds(),
+	}
+	runCtx, cancel := context.WithTimeoutCause(ctx, budget.effective.Limits.MaxDuration, budgetCause)
+	defer cancel()
+
 	execution := &runtimeExecution{
-		started:  time.Now(),
+		started:  started,
+		budget:   budget,
 		shadow:   shadow,
 		recorder: &runStoreRecorder{store: r.runStore, onError: r.onStoreError},
 		observation: RunObservation{
@@ -69,13 +122,21 @@ func (r *Runtime) run(ctx context.Context, input RunInput, shadow bool) (RunOutp
 		},
 	}
 	// 将本次执行状态放入 Context，供 Chain 中的各阶段共享，
-	// 同时继续沿用调用方 Context 的取消和超时信号。
-	runCtx := context.WithValue(ctx, executionContextKey{}, execution)
+	// 同时继续沿用调用方 Context 和 Run 总时间预算的取消信号。
+	runCtx = context.WithValue(runCtx, executionContextKey{}, execution)
 	if shadow {
 		// 影子运行固定使用候选版本，但不改变 Registry 的 active 指针。
 		runCtx = context.WithValue(runCtx, forcedReleaseContextKey{}, r.selectorCandidateVersion())
 	}
 	output, err := r.chain.Invoke(runCtx, input)
+	// 总时间 Context 到期时，将供应商或阶段返回的通用 deadline 错误统一
+	// 转换为带原因和来源的预算违规；调用方自身的 deadline 不会被改写。
+	if runCtx.Err() == context.DeadlineExceeded {
+		if violation, ok := context.Cause(runCtx).(BudgetViolation); ok {
+			output = RunOutput{}
+			err = runtimeFailure("run_budget", violation)
+		}
+	}
 	r.observeExecution(runCtx, input, execution, output, err)
 	return output, err
 }

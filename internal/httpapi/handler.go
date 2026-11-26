@@ -50,6 +50,7 @@ type Handler struct {
 	streaming    HTTPStreamingChatClient
 	logger       *slog.Logger
 	maxBodyBytes int64
+	random       io.Reader // 保存 request ID 的可注入随机源，生产环境使用 crypto/rand.Reader。
 }
 
 type requestMetadata struct {
@@ -116,17 +117,27 @@ func (w *flushingObservedResponseWriter) Flush() {
 }
 
 // NewHandler 创建 HTTP API Handler。
-func NewHandler(client HTTPChatClient, logger *slog.Logger) *Handler {
+// 可选 randomSources 的第一个非空值用于 request ID；未提供时使用 crypto/rand.Reader。
+// 原有 NewHandler(client, logger) 调用方式和 HTTP API 契约保持不变。
+func NewHandler(client HTTPChatClient, logger *slog.Logger, randomSources ...io.Reader) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if client == nil {
 		client = unavailableChatClient{}
 	}
+	randomSource := io.Reader(rand.Reader)
+	for _, candidate := range randomSources {
+		if candidate != nil {
+			randomSource = candidate
+			break
+		}
+	}
 	handler := &Handler{
 		client:       &observedChatClient{next: client, logger: logger},
 		logger:       logger,
 		maxBodyBytes: maxRequestBodySize,
+		random:       randomSource,
 	}
 	if streamingClient, ok := client.(HTTPStreamingChatClient); ok {
 		handler.streaming = &observedStreamingChatClient{
@@ -139,7 +150,7 @@ func NewHandler(client HTTPChatClient, logger *slog.Logger) *Handler {
 
 // ServeHTTP 按路径和方法分发请求，并为接口返回统一 JSON 响应。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	requestID := newRequestID()
+	requestID := newRequestID(h.random)
 	w.Header().Set("X-Request-ID", requestID)
 	metadata := requestMetadata{
 		requestID: requestID,
@@ -631,9 +642,17 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, code, message, r
 }
 
 // newRequestID 为每个请求生成可用于日志关联和故障排查的请求 ID。
-func newRequestID() string {
+// 可选随机源用于确定性测试；未提供时继续使用 crypto/rand，失败回退格式保持不变。
+func newRequestID(randomSources ...io.Reader) string {
+	randomSource := io.Reader(rand.Reader)
+	for _, candidate := range randomSources {
+		if candidate != nil {
+			randomSource = candidate
+			break
+		}
+	}
 	var randomID [8]byte
-	if _, err := rand.Read(randomID[:]); err == nil {
+	if _, err := io.ReadFull(randomSource, randomID[:]); err == nil {
 		return "req-" + hex.EncodeToString(randomID[:])
 	}
 	return fmt.Sprintf("req-%d", time.Now().UnixNano())

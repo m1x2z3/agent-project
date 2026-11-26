@@ -98,7 +98,9 @@ func decode[T any](
 			return zero, DecodeReport{}, &DecodeError{
 				Kind:  kind,
 				Stage: stageRepair,
-				Cause: ErrRepairFailed,
+				// 保留稳定的 ErrRepairFailed 分类，同时让调用方通过错误链识别
+				// 预算超限等结构化原因；DecodeError.Error 仍不会暴露底层错误文本。
+				Cause: errors.Join(ErrRepairFailed, repairErr),
 			}
 		}
 		if err := ctx.Err(); err != nil {

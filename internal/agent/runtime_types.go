@@ -26,10 +26,11 @@ const (
 
 // RunInput 是一次 Agent Runtime 执行所需的业务输入。
 type RunInput struct {
-	RequestID string
-	TenantID  string
-	RunID     string
-	Query     string
+	RequestID string // 保存一次外部请求的关联标识。
+	TenantID  string // 保存当前 Run 所属的租户标识。
+	RunID     string // 保存当前执行的唯一标识。
+	UserID    string // 保存可信调用方提供的用户身份，用于用户级预算解析。
+	Query     string // 保存用户本次提交的研发协作问题。
 }
 
 // RunOutput 是 Runtime 完成两阶段模型调用后的稳定业务结果。
@@ -84,6 +85,7 @@ type RuntimeConfig struct {
 	Registry          *configregistry.Registry
 	Selector          *rollout.Selector
 	Model             ModelCaller
+	BudgetResolver    BudgetResolver // 解析可信用户、租户和 Run 级预算；空值使用安全默认预算。
 	Observer          Observer
 	RunStore          runstore.Store
 	OnStoreError      RunStoreErrorHandler
@@ -96,6 +98,7 @@ type Runtime struct {
 	registry          *configregistry.Registry
 	selector          *rollout.Selector
 	model             ModelCaller
+	budgetResolver    BudgetResolver // 保存可信预算解析依赖，供每次 Run 创建独立控制器。
 	observer          Observer
 	runStore          runstore.Store
 	onStoreError      RunStoreErrorHandler
@@ -125,6 +128,7 @@ type runtimeExecution struct {
 	// Chain 的中间状态用于业务编排，本结构用于跨阶段共享观测信息。
 	mu          sync.Mutex
 	started     time.Time
+	budget      *BudgetController // 保存当前 Run 独立的预算上限和消耗，不与其他执行共享。
 	shadow      bool
 	recorder    *runStoreRecorder
 	observation RunObservation
