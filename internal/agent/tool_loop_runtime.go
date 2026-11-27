@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
@@ -194,44 +193,15 @@ func (r *ToolLoopRuntime) Run(
 		ctx = context.Background()
 	}
 
-	// 总时间预算从配置选择之前开始，避免前置阶段脱离本次 Run 的执行约束。
-	started := recording.ClockFromContext(ctx).Now()
-	budgetSet := BudgetSet{}
-	var err error
-	if r.budgetResolver != nil {
-		budgetSet, err = r.budgetResolver.Resolve(ctx, input)
-		if err != nil {
-			return ToolLoopOutput{}, err
-		}
-	}
-	budget, err := newBudgetController(budgetSet, started)
+	// 执行准备统一负责预算、总超时、观测和 RunStore 记录器，主流程只保留业务编排。
+	ctx, cancel, execution, err := r.prepareExecution(ctx, input)
 	if err != nil {
 		return ToolLoopOutput{}, err
 	}
-	if budgetSet.User != (BudgetLimits{}) && strings.TrimSpace(input.UserID) == "" {
-		return ToolLoopOutput{}, ErrInvalidRunInput
-	}
-	budgetCause := BudgetViolation{
-		Scope:  budget.effective.DurationSource,
-		Reason: "total_time_budget_exceeded",
-		Limit:  budget.effective.Limits.MaxDuration.Milliseconds(),
-		Used:   budget.effective.Limits.MaxDuration.Milliseconds(),
-	}
-	ctx, cancel := context.WithTimeoutCause(ctx, budget.effective.Limits.MaxDuration, budgetCause)
 	defer cancel()
 
-	execution := &runtimeExecution{
-		started:  started,
-		budget:   budget,
-		recorder: &runStoreRecorder{store: r.runStore, onError: r.onStoreError},
-		observation: RunObservation{
-			RequestID: input.RequestID,
-			TenantID:  input.TenantID,
-			RunID:     input.RunID,
-		},
-	}
-	// 通过 Context 把同一个执行账本交给快照绑定和后续阶段，避免重新创建控制器。
-	ctx = context.WithValue(ctx, executionContextKey{}, execution)
+	// 选择本次 Run 的发布版本并绑定不可变配置快照；后续 Prompt、Schema
+	// 和模型路由都从该快照读取，避免执行过程中配置版本发生漂移。
 	state, err := r.selectAndBindSnapshot(ctx, input)
 	if err != nil {
 		return ToolLoopOutput{}, err
@@ -436,73 +406,20 @@ func (r *ToolLoopRuntime) runAnalysis(
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	recordRoute(state.execution, route)
-	if state.execution == nil || state.execution.budget == nil {
-		return toolLoopState{}, ErrRuntimeNotConfigured
-	}
-	// 分析模型调用前先检查 Token 余额、Run 总时间和最大步数，被拒绝时不访问供应商。
-	if err := state.execution.budget.BeginModelStep(recording.ClockFromContext(ctx).Now()); err != nil {
-		return toolLoopState{}, runtimeFailure("tool_loop_analysis_budget", err)
-	}
-	// 单次模型超时不能超过 Run 剩余时间，避免路由配置绕过总时间预算。
-	callTimeout := route.Timeout
-	remaining := state.execution.budget.RemainingDuration(recording.ClockFromContext(ctx).Now())
-	if callTimeout <= 0 || remaining < callTimeout {
-		callTimeout = remaining
-	}
-	// 分析请求的路由输出上限不能超过当前 Run 的剩余 Token。
-	maxTokens := route.MaxTokens
-	remainingTokens := state.execution.budget.RemainingTokens()
-	if maxTokens <= 0 || remainingTokens < maxTokens {
-		maxTokens = remainingTokens
-	}
-
-	// 模型调用只接收已经渲染好的 Prompt；原始供应商协议由 ModelCaller 屏蔽。
-	callStarted := recording.ClockFromContext(ctx).Now()
-	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
-		Task:        analysisTask,
-		Provider:    route.Provider,
-		Model:       route.Model,
-		Temperature: float64Pointer(route.Temperature),
-		MaxTokens:   maxTokensPointer(maxTokens),
-		Timeout:     callTimeout,
-		Messages:    []modelgateway.Message{{Role: "user", Content: rendered}},
+	// 公共模型调用保留分析阶段的预算和模型错误分类，并统一完成记录及 Token 结算。
+	response, err := r.callModelWithinBudget(ctx, state, route, runtimeModelCall{
+		task:             analysisTask,
+		prompt:           rendered,
+		budgetStage:      "tool_loop_analysis_budget",
+		tokenBudgetStage: "tool_loop_analysis_token_budget",
+		modelStage:       "tool_loop_analysis_model",
+		modelError:       ErrAnalysisModelFailed,
 	})
-	if state.execution != nil && state.execution.recorder != nil {
-		state.execution.recorder.recordModelCall(
-			ctx,
-			state.input,
-			route,
-			response,
-			recording.ClockFromContext(ctx).Now().Sub(callStarted),
-			err,
-		)
-	}
 	// 原始响应仅留在当前阶段状态中，最终输出和观测不会暴露模型原文。
 	state.analysisPrompt = rendered
 	state.analysisResponse = response
-	recordModelResponse(state.execution, state.snapshot, response, analysisTask)
-	// 即使供应商同时返回错误，只要响应带有真实 Usage，也必须先结算已发生的消耗。
-	if response.Usage != nil {
-		used := response.Usage.TotalTokens
-		if used == 0 {
-			used = response.Usage.PromptTokens + response.Usage.CompletionTokens
-		}
-		if budgetErr := state.execution.budget.ChargeTokens(used); budgetErr != nil {
-			return toolLoopState{}, runtimeFailure("tool_loop_analysis_token_budget", budgetErr)
-		}
-	} else {
-		// 工具循环的分析阶段与普通 Runtime 使用相同的确定性估算规则。
-		used := estimateTokenCount(rendered) + estimateTokenCount(response.Message.Content)
-		if budgetErr := state.execution.budget.ChargeEstimatedTokens(used); budgetErr != nil {
-			return toolLoopState{}, runtimeFailure("tool_loop_analysis_token_budget", budgetErr)
-		}
-	}
 	if err != nil {
-		return toolLoopState{}, runtimeFailure(
-			"tool_loop_analysis_model",
-			fmt.Errorf("%w: %w", ErrAnalysisModelFailed, err),
-		)
+		return toolLoopState{}, err
 	}
 
 	references, err := resolveReferences(
@@ -700,73 +617,18 @@ func (r *ToolLoopRuntime) callToolLoopFinalModel(
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	recordRoute(state.execution, route)
-	if state.execution == nil || state.execution.budget == nil {
-		return toolLoopState{}, ErrRuntimeNotConfigured
-	}
-	// 最终回答同样消耗本次 Run 的步数、Token 和总时间，不能绕过工具循环账本。
-	if err := state.execution.budget.BeginModelStep(recording.ClockFromContext(ctx).Now()); err != nil {
-		return toolLoopState{}, runtimeFailure("tool_loop_final_budget", err)
-	}
-	callTimeout := route.Timeout
-	remaining := state.execution.budget.RemainingDuration(recording.ClockFromContext(ctx).Now())
-	if callTimeout <= 0 || remaining < callTimeout {
-		callTimeout = remaining
-	}
-	// 最终回答使用同一 Run 的剩余 Token 收紧路由 MaxTokens。
-	maxTokens := route.MaxTokens
-	remainingTokens := state.execution.budget.RemainingTokens()
-	if maxTokens <= 0 || remainingTokens < maxTokens {
-		maxTokens = remainingTokens
-	}
-
-	// 这里只调用模型生成最终回答文本，不允许模型响应绕过后续解析校验。
-	callStarted := recording.ClockFromContext(ctx).Now()
-	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
-		Task:        finalTask,
-		Provider:    route.Provider,
-		Model:       route.Model,
-		Temperature: float64Pointer(route.Temperature),
-		MaxTokens:   maxTokensPointer(maxTokens),
-		Timeout:     callTimeout,
-		Messages: []modelgateway.Message{{
-			Role:    "user",
-			Content: state.finalPrompt,
-		}},
+	// 公共模型调用保留最终回答阶段的错误分类，并统一处理预算、记录和 Token 结算。
+	response, err := r.callModelWithinBudget(ctx, state, route, runtimeModelCall{
+		task:             finalTask,
+		prompt:           state.finalPrompt,
+		budgetStage:      "tool_loop_final_budget",
+		tokenBudgetStage: "tool_loop_final_token_budget",
+		modelStage:       "tool_loop_final_model",
+		modelError:       ErrFinalModelFailed,
 	})
-	if state.execution != nil && state.execution.recorder != nil {
-		state.execution.recorder.recordModelCall(
-			ctx,
-			state.input,
-			route,
-			response,
-			recording.ClockFromContext(ctx).Now().Sub(callStarted),
-			err,
-		)
-	}
 	state.finalResponse = response
-	recordModelResponse(state.execution, state.snapshot, response, finalTask)
-	// 最终回答产生的真实 Token 也计入同一预算，调用失败时不能丢弃已发生的消耗。
-	if response.Usage != nil {
-		used := response.Usage.TotalTokens
-		if used == 0 {
-			used = response.Usage.PromptTokens + response.Usage.CompletionTokens
-		}
-		if budgetErr := state.execution.budget.ChargeTokens(used); budgetErr != nil {
-			return toolLoopState{}, runtimeFailure("tool_loop_final_token_budget", budgetErr)
-		}
-	} else {
-		// 工具循环的最终回答也按实际 Prompt 和响应估算，保持五类模型调用规则一致。
-		used := estimateTokenCount(state.finalPrompt) + estimateTokenCount(response.Message.Content)
-		if budgetErr := state.execution.budget.ChargeEstimatedTokens(used); budgetErr != nil {
-			return toolLoopState{}, runtimeFailure("tool_loop_final_token_budget", budgetErr)
-		}
-	}
 	if err != nil {
-		return toolLoopState{}, runtimeFailure(
-			"tool_loop_final_model",
-			fmt.Errorf("%w: %w", ErrFinalModelFailed, err),
-		)
+		return toolLoopState{}, err
 	}
 	return state, nil
 }
@@ -916,74 +778,19 @@ func (r *ToolLoopRuntime) callToolDecisionModel(
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	recordRoute(state.execution, route)
-	if state.execution == nil || state.execution.budget == nil {
-		return toolLoopState{}, ErrRuntimeNotConfigured
-	}
-	// 每一轮工具决策都消耗同一个 Run 的步数、Token 和总时间预算。
-	if err := state.execution.budget.BeginModelStep(recording.ClockFromContext(ctx).Now()); err != nil {
-		return toolLoopState{}, runtimeFailure("tool_loop_tool_decision_budget", err)
-	}
-	callTimeout := route.Timeout
-	remaining := state.execution.budget.RemainingDuration(recording.ClockFromContext(ctx).Now())
-	if callTimeout <= 0 || remaining < callTimeout {
-		callTimeout = remaining
-	}
-	// 每一轮工具决策都只能使用当前剩余 Token 与路由配置中的较小输出上限。
-	maxTokens := route.MaxTokens
-	remainingTokens := state.execution.budget.RemainingTokens()
-	if maxTokens <= 0 || remainingTokens < maxTokens {
-		maxTokens = remainingTokens
-	}
-
-	// 这里只请求模型给出调用意图，不允许模型响应直接触发工具。
-	callStarted := recording.ClockFromContext(ctx).Now()
-	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
-		Task:        toolDecisionTask,
-		Provider:    route.Provider,
-		Model:       route.Model,
-		Temperature: float64Pointer(route.Temperature),
-		MaxTokens:   maxTokensPointer(maxTokens),
-		Timeout:     callTimeout,
-		Messages: []modelgateway.Message{{
-			Role:    "user",
-			Content: state.toolDecisionPrompt,
-		}},
+	// 公共模型调用保留工具决策阶段的错误分类，并统一处理预算、记录和 Token 结算。
+	response, err := r.callModelWithinBudget(ctx, state, route, runtimeModelCall{
+		task:             toolDecisionTask,
+		prompt:           state.toolDecisionPrompt,
+		budgetStage:      "tool_loop_tool_decision_budget",
+		tokenBudgetStage: "tool_loop_tool_decision_token_budget",
+		modelStage:       "tool_loop_tool_decision_model",
+		modelError:       ErrToolDecisionModelFailed,
 	})
-	if state.execution != nil && state.execution.recorder != nil {
-		state.execution.recorder.recordModelCall(
-			ctx,
-			state.input,
-			route,
-			response,
-			recording.ClockFromContext(ctx).Now().Sub(callStarted),
-			err,
-		)
-	}
 	// 原始响应只留在中间状态，下一阶段会执行严格结构化校验。
 	state.toolDecisionResponse = response
-	recordModelResponse(state.execution, state.snapshot, response, toolDecisionTask)
-	// 模型已经返回的 Usage 必须计入本次 Run，即使供应商同时返回了调用错误。
-	if response.Usage != nil {
-		used := response.Usage.TotalTokens
-		if used == 0 {
-			used = response.Usage.PromptTokens + response.Usage.CompletionTokens
-		}
-		if budgetErr := state.execution.budget.ChargeTokens(used); budgetErr != nil {
-			return toolLoopState{}, runtimeFailure("tool_loop_tool_decision_token_budget", budgetErr)
-		}
-	} else {
-		// 每轮工具决策都按本轮实际 Prompt 和响应估算，不能因 Usage 缺失跳过预算。
-		used := estimateTokenCount(state.toolDecisionPrompt) + estimateTokenCount(response.Message.Content)
-		if budgetErr := state.execution.budget.ChargeEstimatedTokens(used); budgetErr != nil {
-			return toolLoopState{}, runtimeFailure("tool_loop_tool_decision_token_budget", budgetErr)
-		}
-	}
 	if err != nil {
-		return toolLoopState{}, runtimeFailure(
-			"tool_loop_tool_decision_model",
-			fmt.Errorf("%w: %w", ErrToolDecisionModelFailed, err),
-		)
+		return toolLoopState{}, err
 	}
 	return state, nil
 }

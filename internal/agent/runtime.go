@@ -3,9 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"agent-project/internal/recording"
 	"agent-project/internal/structuredoutput"
 	"github.com/cloudwego/eino/compose"
 )
@@ -83,47 +81,17 @@ func (r *Runtime) run(ctx context.Context, input RunInput, shadow bool) (RunOutp
 		return RunOutput{}, err
 	}
 
-	started := recording.ClockFromContext(ctx).Now()
-	budgetSet := BudgetSet{}
-	var err error
-	if r.budgetResolver != nil {
-		budgetSet, err = r.budgetResolver.Resolve(ctx, input)
-		if err != nil {
-			return RunOutput{}, err
-		}
-	}
-	budget, err := newBudgetController(budgetSet, started)
+	// 共享执行准备统一处理预算、总超时、执行账本和 Shadow 观测标记。
+	runCtx, cancel, execution, err := prepareRunExecution(ctx, input, runExecutionOptions{
+		budgetResolver: r.budgetResolver,
+		runStore:       r.runStore,
+		onStoreError:   r.onStoreError,
+		shadow:         shadow,
+	})
 	if err != nil {
 		return RunOutput{}, err
 	}
-	// 只有配置用户级预算时才强制要求可信用户身份，保持现有无用户预算调用兼容。
-	if budgetSet.User != (BudgetLimits{}) && strings.TrimSpace(input.UserID) == "" {
-		return RunOutput{}, ErrInvalidRunInput
-	}
-	budgetCause := BudgetViolation{
-		Scope:  budget.effective.DurationSource,
-		Reason: "total_time_budget_exceeded",
-		Limit:  budget.effective.Limits.MaxDuration.Milliseconds(),
-		Used:   budget.effective.Limits.MaxDuration.Milliseconds(),
-	}
-	runCtx, cancel := context.WithTimeoutCause(ctx, budget.effective.Limits.MaxDuration, budgetCause)
 	defer cancel()
-
-	execution := &runtimeExecution{
-		started:  started,
-		budget:   budget,
-		shadow:   shadow,
-		recorder: &runStoreRecorder{store: r.runStore, onError: r.onStoreError},
-		observation: RunObservation{
-			RequestID: input.RequestID,
-			TenantID:  input.TenantID,
-			RunID:     input.RunID,
-			Shadow:    shadow,
-		},
-	}
-	// 将本次执行状态放入 Context，供 Chain 中的各阶段共享，
-	// 同时继续沿用调用方 Context 和 Run 总时间预算的取消信号。
-	runCtx = context.WithValue(runCtx, executionContextKey{}, execution)
 	if shadow {
 		// 影子运行固定使用候选版本，但不改变 Registry 的 active 指针。
 		runCtx = context.WithValue(runCtx, forcedReleaseContextKey{}, r.selectorCandidateVersion())

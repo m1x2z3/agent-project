@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"agent-project/internal/configregistry"
-	"agent-project/internal/modelgateway"
-	"agent-project/internal/recording"
 	"agent-project/internal/rollout"
 	"agent-project/internal/structuredoutput"
 )
@@ -106,65 +104,18 @@ func (r *Runtime) callAnalysisModel(ctx context.Context, state runtimeState) (ru
 	if err != nil {
 		return runtimeState{}, err
 	}
-	recordRoute(state.execution, route)
-	if state.execution == nil || state.execution.budget == nil {
-		return runtimeState{}, ErrRuntimeNotConfigured
-	}
-	// 模型调用前先检查 Token 余额、Run 总时间和最大步数，被拒绝时不访问供应商。
-	if err := state.execution.budget.BeginModelStep(recording.ClockFromContext(ctx).Now()); err != nil {
-		return runtimeState{}, runtimeFailure("analysis_budget", err)
-	}
-	callTimeout := route.Timeout
-	remaining := state.execution.budget.RemainingDuration(recording.ClockFromContext(ctx).Now())
-	if callTimeout <= 0 || remaining < callTimeout {
-		callTimeout = remaining
-	}
-	// 本次输出上限同时受路由配置和 Run 剩余 Token 约束，取两者中的较小正值。
-	maxTokens := route.MaxTokens
-	remainingTokens := state.execution.budget.RemainingTokens()
-	if maxTokens <= 0 || remainingTokens < maxTokens {
-		maxTokens = remainingTokens
-	}
-	// Runtime 只依赖 ModelCaller，不感知 DeepSeek、Kimi 或 OpenAI 兼容协议。
-	// 供应商选择和底层 HTTP 细节由 modelgateway 负责。
-	callStarted := recording.ClockFromContext(ctx).Now()
-	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
-		Task:        analysisTask,
-		Provider:    route.Provider,
-		Model:       route.Model,
-		Temperature: float64Pointer(route.Temperature),
-		MaxTokens:   maxTokensPointer(maxTokens),
-		Timeout:     callTimeout,
-		Messages:    []modelgateway.Message{{Role: "user", Content: state.analysisPrompt}},
+	// 共享调用内核统一执行预算、记录和 Token 结算，这里保留分析阶段错误分类。
+	response, err := r.callModelWithinBudget(ctx, state, route, runtimeModelCall{
+		task:             analysisTask,
+		prompt:           state.analysisPrompt,
+		budgetStage:      "analysis_budget",
+		tokenBudgetStage: "analysis_token_budget",
+		modelStage:       "analysis_model",
+		modelError:       ErrAnalysisModelFailed,
 	})
-	state.execution.recorder.recordModelCall(
-		ctx,
-		state.input,
-		route,
-		response,
-		recording.ClockFromContext(ctx).Now().Sub(callStarted),
-		err,
-	)
 	state.analysisResponse = response
-	// 即使供应商返回错误，只要响应带有真实 Usage，也必须先记录并结算已经发生的消耗。
-	recordModelResponse(state.execution, state.snapshot, response, analysisTask)
-	if response.Usage != nil {
-		used := response.Usage.TotalTokens
-		if used == 0 {
-			used = response.Usage.PromptTokens + response.Usage.CompletionTokens
-		}
-		if budgetErr := state.execution.budget.ChargeTokens(used); budgetErr != nil {
-			return runtimeState{}, runtimeFailure("analysis_token_budget", budgetErr)
-		}
-	} else {
-		// 供应商未返回 Usage 时按实际 Prompt 和响应文本估算，不能将本次调用记为零消耗。
-		used := estimateTokenCount(state.analysisPrompt) + estimateTokenCount(response.Message.Content)
-		if budgetErr := state.execution.budget.ChargeEstimatedTokens(used); budgetErr != nil {
-			return runtimeState{}, runtimeFailure("analysis_token_budget", budgetErr)
-		}
-	}
 	if err != nil {
-		return runtimeState{}, runtimeFailure("analysis_model", fmt.Errorf("%w: %w", ErrAnalysisModelFailed, err))
+		return runtimeState{}, err
 	}
 	return state, nil
 }
@@ -221,62 +172,18 @@ func (r *Runtime) callFinalModel(ctx context.Context, state runtimeState) (runti
 	if err != nil {
 		return runtimeState{}, err
 	}
-	recordRoute(state.execution, route)
-	if state.execution == nil || state.execution.budget == nil {
-		return runtimeState{}, ErrRuntimeNotConfigured
-	}
-	// 最终回答也消耗同一次 Run 的 Token、步数和总时间，不能绕过分析阶段的预算账本。
-	if err := state.execution.budget.BeginModelStep(recording.ClockFromContext(ctx).Now()); err != nil {
-		return runtimeState{}, runtimeFailure("final_budget", err)
-	}
-	callTimeout := route.Timeout
-	remaining := state.execution.budget.RemainingDuration(recording.ClockFromContext(ctx).Now())
-	if callTimeout <= 0 || remaining < callTimeout {
-		callTimeout = remaining
-	}
-	// 最终回答的输出上限同样取路由配置和 Run 剩余 Token 的较小值。
-	maxTokens := route.MaxTokens
-	remainingTokens := state.execution.budget.RemainingTokens()
-	if maxTokens <= 0 || remainingTokens < maxTokens {
-		maxTokens = remainingTokens
-	}
-	callStarted := recording.ClockFromContext(ctx).Now()
-	response, err := r.model.Chat(ctx, modelgateway.ChatRequest{
-		Task:        finalTask,
-		Provider:    route.Provider,
-		Model:       route.Model,
-		Temperature: float64Pointer(route.Temperature),
-		MaxTokens:   maxTokensPointer(maxTokens),
-		Timeout:     callTimeout,
-		Messages:    []modelgateway.Message{{Role: "user", Content: state.finalPrompt}},
+	// 共享调用内核统一执行预算、记录和 Token 结算，这里保留最终回答阶段错误分类。
+	response, err := r.callModelWithinBudget(ctx, state, route, runtimeModelCall{
+		task:             finalTask,
+		prompt:           state.finalPrompt,
+		budgetStage:      "final_budget",
+		tokenBudgetStage: "final_token_budget",
+		modelStage:       "final_model",
+		modelError:       ErrFinalModelFailed,
 	})
-	state.execution.recorder.recordModelCall(
-		ctx,
-		state.input,
-		route,
-		response,
-		recording.ClockFromContext(ctx).Now().Sub(callStarted),
-		err,
-	)
 	state.finalResponse = response
-	recordModelResponse(state.execution, state.snapshot, response, finalTask)
-	if response.Usage != nil {
-		used := response.Usage.TotalTokens
-		if used == 0 {
-			used = response.Usage.PromptTokens + response.Usage.CompletionTokens
-		}
-		if budgetErr := state.execution.budget.ChargeTokens(used); budgetErr != nil {
-			return runtimeState{}, runtimeFailure("final_token_budget", budgetErr)
-		}
-	} else {
-		// 最终回答缺失 Usage 时也必须结算 Prompt 和响应的估算消耗。
-		used := estimateTokenCount(state.finalPrompt) + estimateTokenCount(response.Message.Content)
-		if budgetErr := state.execution.budget.ChargeEstimatedTokens(used); budgetErr != nil {
-			return runtimeState{}, runtimeFailure("final_token_budget", budgetErr)
-		}
-	}
 	if err != nil {
-		return runtimeState{}, runtimeFailure("final_model", fmt.Errorf("%w: %w", ErrFinalModelFailed, err))
+		return runtimeState{}, err
 	}
 	return state, nil
 }
