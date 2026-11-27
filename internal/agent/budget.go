@@ -4,19 +4,27 @@ import (
 	"context"
 	"errors"
 	"time"
+	"unicode/utf8"
+
+	"agent-project/internal/recording"
+	"agent-project/internal/structuredoutput"
 )
 
 // BudgetScope 标识一项预算限制所属的可信作用域。
 // 它用于说明有效预算来自用户、租户还是单次 Run，不接受模型输出作为来源。
 type BudgetScope string
 
-const BudgetScopeUser BudgetScope = "user"       // 标识用户级预算来源。
-const BudgetScopeTenant BudgetScope = "tenant"   // 标识租户级预算来源。
-const BudgetScopeRun BudgetScope = "run"         // 标识单次 Run 级预算来源。
-const BudgetScopeDefault BudgetScope = "default" // 标识本地安全默认预算来源。
+const BudgetScopeUser BudgetScope = "user"
 
-var ErrInvalidBudget = errors.New("agent budget is invalid")   // 表示预算配置包含负数或其他非法上限。
-var ErrBudgetExceeded = errors.New("agent budget is exceeded") // 表示一次 Run 已达到确定性预算终止条件。
+const BudgetScopeTenant BudgetScope = "tenant"
+
+const BudgetScopeRun BudgetScope = "run"
+
+const BudgetScopeDefault BudgetScope = "default"
+
+var ErrInvalidBudget = errors.New("agent budget is invalid")
+
+var ErrBudgetExceeded = errors.New("agent budget is exceeded")
 
 // BudgetViolation 描述一次可安全记录和返回的预算超限事实。
 // 该结构只包含稳定分类和数值，不携带 Prompt、模型回答或工具参数。
@@ -339,4 +347,53 @@ func (r FixedBudgetResolver) Resolve(ctx context.Context, _ RunInput) (BudgetSet
 		return BudgetSet{}, err
 	}
 	return r.Budgets, nil
+}
+
+// budgetedRepair 将一次结构化修复纳入当前 Run 的步数和 Token 预算。
+//
+// RepairFunc 不携带供应商 Usage，因此修复结束后按非法原文和修复结果执行
+// 确定性估算；即使修复返回错误，也先结算已经发生的输入和输出消耗。
+func budgetedRepair(
+	execution *runtimeExecution,
+	repair structuredoutput.RepairFunc,
+) structuredoutput.RepairFunc {
+	if repair == nil {
+		return nil
+	}
+	return func(ctx context.Context, request structuredoutput.RepairRequest) ([]byte, error) {
+		if execution == nil || execution.budget == nil {
+			return nil, ErrRuntimeNotConfigured
+		}
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		// 修复调用与普通模型调用共享步数和 Token 余额，被拒绝时不调用原修复函数。
+		if err := execution.budget.BeginModelStep(recording.ClockFromContext(ctx).Now()); err != nil {
+			return nil, err
+		}
+		repaired, repairErr := repair(ctx, request)
+		estimated := estimateTokenCount(string(request.Raw)) + estimateTokenCount(string(repaired))
+		if err := execution.budget.ChargeEstimatedTokens(estimated); err != nil {
+			return nil, err
+		}
+		if repairErr != nil {
+			return nil, repairErr
+		}
+		return repaired, nil
+	}
+}
+
+// estimateTokenCount 在供应商未返回 Usage 时提供确定性的本地 Token 粗估。
+//
+// 估算按 Unicode 码点数量每 4 个计 1 个 Token，非空文本至少计 1 个；
+// 相同输入始终得到相同结果，不依赖供应商、随机数或当前时间。该值只用于
+// 预算兜底，不代表真实计费用量，也不能写进 Observer 的真实 Usage 字段。
+func estimateTokenCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	runes := utf8.RuneCountInString(text)
+	return (runes + 3) / 4
 }

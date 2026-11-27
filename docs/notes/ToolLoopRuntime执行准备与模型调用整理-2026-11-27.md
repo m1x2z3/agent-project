@@ -78,4 +78,4 @@ go test -race -count=1 ./...
 
 ## 7. 后续共享优化
 
-同日完成后续独立优化后，上述私有实现已泛化：`tool_loop_execution.go` 和 `tool_loop_model_call.go` 分别由 `runtime_execution.go` 和 `runtime_model_call.go` 取代，`toolLoopModelCall` 已更名为 `runtimeModelCall`。普通 Runtime 也已复用共享执行准备与模型调用内核，两个 Runtime 的公开入口仍保留。当前结构及验收见 `docs/notes/Runtime共享执行准备与模型调用整理-2026-11-27.md`。
+同日完成后续独立优化后，上述私有实现已泛化：`tool_loop_execution.go` 和 `tool_loop_model_call.go` 最初分别由 `runtime_execution.go` 和 `runtime_model_call.go` 取代，`toolLoopModelCall` 已更名为 `runtimeModelCall`。普通 Runtime 也已复用共享执行准备与模型调用内核，两个 Runtime 的公开入口仍保留。随后的功能域整理又将共享模型调用与辅助函数归并到 `runtime_execution.go`，并将 ToolLoop 分为生命周期、模型阶段和工具执行三个文件。最终结构见 `docs/notes/Agent功能域文件整理-2026-11-27.md`。
