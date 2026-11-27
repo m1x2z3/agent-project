@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -422,28 +423,99 @@ func cloneToolDecision(decision structuredoutput.ToolDecision) (structuredoutput
 	return cloned, nil
 }
 
-// encodeToolHistory 将内部工具结果转换成模型可见的稳定 JSON。
+// compressToolResultData 将超过目标的单个工具 Data 投影为确定性 JSON 摘要。
 //
-// 使用独立的 Prompt 类型，避免把内部结构字段或未来新增的敏感字段
-// 意外暴露给模型。
-func encodeToolHistory(history []toolHistoryEntry) (string, error) {
-	type promptSourceRef struct {
-		Source   string `json:"source"`
-		Location string `json:"location"`
+// 函数先用 json.Compact 校验并紧凑编码原始数据，避免无意义地压缩只包含
+// 大量空白的数据。未超过目标时返回原始 bytes 的独立副本；超过目标时只保留
+// 原始 Token 估算、SHA-256 摘要和 UTF-8 安全预览。maxTokens 必须来自已规范化
+// 的正数策略，压缩过程不调用模型，也不修改调用方持有的 Data。
+func compressToolResultData(
+	data json.RawMessage,
+	maxTokens int,
+) (json.RawMessage, bool, error) {
+	if maxTokens <= 0 {
+		return nil, false, ErrInvalidContextPolicy
 	}
-	type promptHistoryEntry struct {
-		ToolName        string            `json:"tool_name"`
-		ToolVersion     string            `json:"tool_version"`
-		Status          string            `json:"status"`
-		ErrorCode       string            `json:"error_code,omitempty"`
-		ArgumentsDigest string            `json:"arguments_digest"`
-		Data            json.RawMessage   `json:"data,omitempty"`
-		Source          []promptSourceRef `json:"source,omitempty"`
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, data); err != nil {
+		return nil, false, fmt.Errorf("%w: invalid tool data", ErrToolHistoryEncodingFailed)
+	}
+	// 是否压缩按紧凑内容判断，original_tokens 则保留原始 Data 的本地估算口径。
+	if estimateTokenCount(compact.String()) <= maxTokens {
+		return append(json.RawMessage(nil), data...), false, nil
 	}
 
-	encodedHistory := make([]promptHistoryEntry, 0, len(history))
+	// Token 估算按每四个 Unicode 码点计算，因此预览也按码点而不是字节截断。
+	previewRunes := []rune(compact.String())
+	// 只有 maxTokens 不超过现有内容的四分之一时才相乘，避免超大自定义值溢出。
+	if maxTokens <= len(previewRunes)/4 && len(previewRunes) > maxTokens*4 {
+		previewRunes = previewRunes[:maxTokens*4]
+	}
+	sum := sha256.Sum256(data)
+	projected := struct {
+		Compressed     bool   `json:"compressed"`
+		OriginalTokens int    `json:"original_tokens"`
+		Digest         string `json:"digest"`
+		Preview        string `json:"preview"`
+	}{
+		Compressed:     true,
+		OriginalTokens: estimateTokenCount(string(data)),
+		Digest:         "sha256:" + hex.EncodeToString(sum[:]),
+		Preview:        string(previewRunes),
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: marshal compressed tool data", ErrToolHistoryEncodingFailed)
+	}
+	return encoded, true, nil
+}
+
+// contextGovernanceReport 描述一次模型 Prompt 构建产生的脱敏治理结果。
+//
+// 报告只包含上下文版本、是否发生治理和本地 Token 估算，不携带 Prompt、
+// 工具 Data、压缩预览或来源内容；后续 Prompt 构建阶段每次提交一份报告。
+type contextGovernanceReport struct {
+	contextVersion string // 标识本次 Prompt 使用的上下文算法、发布版本和实际策略。
+	trimmed        bool   // 表示本次构建是否实际发生压缩、历史降级或条目省略。
+	tokensBefore   int    // 保存相同模板下未治理基线 Prompt 的本地 Token 估算。
+	tokensAfter    int    // 保存实际发送给模型的治理后 Prompt 本地 Token 估算。
+}
+
+// promptSourceRef 是允许进入模型 Prompt 的工具来源投影。
+type promptSourceRef struct {
+	Source   string `json:"source"`
+	Location string `json:"location"`
+}
+
+// promptHistoryEntry 是允许进入模型 Prompt 的单条工具历史投影。
+//
+// 字段必须显式列出，不能直接序列化内部 toolHistoryEntry，避免未来新增的
+// 授权或执行字段意外暴露给模型。
+type promptHistoryEntry struct {
+	ToolName        string            `json:"tool_name"`
+	ToolVersion     string            `json:"tool_version"`
+	Status          string            `json:"status"`
+	ErrorCode       string            `json:"error_code,omitempty"`
+	ArgumentsDigest string            `json:"arguments_digest"`
+	Data            json.RawMessage   `json:"data,omitempty"`
+	Source          []promptSourceRef `json:"source,omitempty"`
+}
+
+// promptHistoryEnvelope 为模型说明历史版本和裁剪情况，避免把投影误认为完整历史。
+type promptHistoryEnvelope struct {
+	ContextVersion string               `json:"context_version"`
+	OmittedEntries int                  `json:"omitted_entries"`
+	Entries        []promptHistoryEntry `json:"entries"`
+}
+
+// projectToolHistory 将内部工具历史复制为独立的模型可见条目。
+//
+// Data 和 Source 都会复制，后续压缩、降级和省略只修改返回的投影，不会
+// 修改原始 toolHistory。所有 Data 在投影时验证，不能通过后续省略掩盖非法 JSON。
+func projectToolHistory(history []toolHistoryEntry) ([]promptHistoryEntry, error) {
+	entries := make([]promptHistoryEntry, 0, len(history))
 	for _, entry := range history {
-		// 只映射允许进入 Prompt 的字段，不直接序列化内部 toolHistoryEntry。
+		// 只映射允许进入 Prompt 的脱敏元数据。
 		promptEntry := promptHistoryEntry{
 			ToolName:        entry.Record.ToolName,
 			ToolVersion:     entry.Record.ToolVersion,
@@ -452,14 +524,12 @@ func encodeToolHistory(history []toolHistoryEntry) (string, error) {
 			ArgumentsDigest: entry.Record.ArgumentsDigest,
 		}
 		if len(entry.Data) > 0 {
-			// 工具结果必须保持合法 JSON，避免生成不可解析的历史内容。
 			if !json.Valid(entry.Data) {
-				return "", fmt.Errorf("%w: invalid tool data", ErrToolHistoryEncodingFailed)
+				return nil, fmt.Errorf("%w: invalid tool data", ErrToolHistoryEncodingFailed)
 			}
 			promptEntry.Data = append(json.RawMessage(nil), entry.Data...)
 		}
 		if len(entry.Source) > 0 {
-			// Source 只保留来源和位置，避免把内部对象字段扩散到模型输入。
 			promptEntry.Source = make([]promptSourceRef, 0, len(entry.Source))
 			for _, source := range entry.Source {
 				promptEntry.Source = append(promptEntry.Source, promptSourceRef{
@@ -468,15 +538,126 @@ func encodeToolHistory(history []toolHistoryEntry) (string, error) {
 				})
 			}
 		}
-		encodedHistory = append(encodedHistory, promptEntry)
+		entries = append(entries, promptEntry)
 	}
+	return entries, nil
+}
 
-	data, err := json.Marshal(encodedHistory)
+// marshalToolHistoryEnvelope 编码带上下文版本和省略数量的历史投影。
+func marshalToolHistoryEnvelope(
+	entries []promptHistoryEntry,
+	contextVersion string,
+	omittedEntries int,
+) (string, error) {
+	if entries == nil {
+		entries = make([]promptHistoryEntry, 0)
+	}
+	data, err := json.Marshal(promptHistoryEnvelope{
+		ContextVersion: contextVersion,
+		OmittedEntries: omittedEntries,
+		Entries:        entries,
+	})
 	if err != nil {
 		return "", fmt.Errorf("%w: marshal tool history", ErrToolHistoryEncodingFailed)
 	}
-	// 返回稳定 JSON 字符串，供 Prompt 模板通过 ToolHistory 变量使用。
 	return string(data), nil
+}
+
+// encodeGovernedToolHistory 从原始历史构建独立、确定性的版本化治理投影。
+//
+// 每条 Data 先按单结果目标压缩。整个 envelope 仍超过历史目标时，按从最旧
+// 到最新的顺序移除非关键旧条目的 Data；仍超过目标时再省略这些条目。
+// 最新 KeepLatestResults 条和失败条目属于关键证据，不降级也不省略，因此
+// 固定元数据和关键证据允许超过目标，而不会为了硬凑上限被删除。
+func encodeGovernedToolHistory(
+	history []toolHistoryEntry,
+	policy ContextPolicy,
+	releaseVersion string,
+) (string, contextGovernanceReport, error) {
+	normalized, err := normalizeContextPolicy(policy)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+	report := contextGovernanceReport{
+		contextVersion: normalized.contextVersion(releaseVersion),
+	}
+	entries, err := projectToolHistory(history)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+
+	// 关键标记跟随原始顺序；后续省略条目时同步删除对应标记。
+	critical := make([]bool, len(entries))
+	latestStart := len(entries) - normalized.KeepLatestResults
+	if latestStart < 0 {
+		latestStart = 0
+	}
+	for index := range entries {
+		failed := entries[index].ErrorCode != "" ||
+			(entries[index].Status != "" && entries[index].Status != string(tooling.ResultSuccess))
+		critical[index] = index >= latestStart || failed
+		if len(entries[index].Data) == 0 {
+			continue
+		}
+		compressed, didCompress, err := compressToolResultData(
+			entries[index].Data,
+			normalized.MaxToolResultTokens,
+		)
+		if err != nil {
+			return "", contextGovernanceReport{}, err
+		}
+		entries[index].Data = compressed
+		report.trimmed = report.trimmed || didCompress
+	}
+
+	encoded, err := marshalToolHistoryEnvelope(entries, report.contextVersion, 0)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+	// 第一阶段只降级非关键旧条目，每次移除最旧的一份 Data 后重新计算整体估算。
+	for estimateTokenCount(encoded) > normalized.MaxHistoryTokens {
+		degraded := false
+		for index := range entries {
+			if critical[index] || len(entries[index].Data) == 0 {
+				continue
+			}
+			entries[index].Data = nil
+			report.trimmed = true
+			degraded = true
+			break
+		}
+		if !degraded {
+			break
+		}
+		encoded, err = marshalToolHistoryEnvelope(entries, report.contextVersion, 0)
+		if err != nil {
+			return "", contextGovernanceReport{}, err
+		}
+	}
+
+	// 第二阶段才省略非关键旧条目；关键证据即使超出目标也完整保留其投影。
+	omittedEntries := 0
+	for estimateTokenCount(encoded) > normalized.MaxHistoryTokens {
+		oldest := -1
+		for index := range entries {
+			if !critical[index] {
+				oldest = index
+				break
+			}
+		}
+		if oldest < 0 {
+			break
+		}
+		entries = append(entries[:oldest], entries[oldest+1:]...)
+		critical = append(critical[:oldest], critical[oldest+1:]...)
+		omittedEntries++
+		report.trimmed = true
+		encoded, err = marshalToolHistoryEnvelope(entries, report.contextVersion, omittedEntries)
+		if err != nil {
+			return "", contextGovernanceReport{}, err
+		}
+	}
+	return encoded, report, nil
 }
 
 // digestToolLoopDecision 为“执行阶段 + 规范化模型决策”生成稳定摘要。

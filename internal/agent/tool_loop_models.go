@@ -88,6 +88,58 @@ func (r *ToolLoopRuntime) runAnalysis(
 	return state, nil
 }
 
+// renderGovernedToolLoopPrompt 使用同一模板构建未治理基线和实际治理后 Prompt。
+//
+// before 和 after 都包含 Query、TaskAnalysis、模板文本及版本化历史 envelope，
+// 区别只在于历史是否经过压缩、降级和省略。调用方在渲染成功后提交报告，
+// 由当前 Run 的执行账本统一累计到 Observer/RunStore 最终观测。
+func (r *ToolLoopRuntime) renderGovernedToolLoopPrompt(
+	template string,
+	state toolLoopState,
+) (string, contextGovernanceReport, error) {
+	normalized, err := normalizeContextPolicy(r.contextPolicy)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+	contextVersion := normalized.contextVersion(state.snapshot.ReleaseVersion)
+	// 基线使用完整原始历史和相同 envelope，不用旧数组格式，保证统计口径一致。
+	baselineEntries, err := projectToolHistory(state.toolHistory)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+	baselineHistory, err := marshalToolHistoryEnvelope(baselineEntries, contextVersion, 0)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+	governedHistory, report, err := encodeGovernedToolHistory(
+		state.toolHistory,
+		normalized,
+		state.snapshot.ReleaseVersion,
+	)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+
+	// 两次渲染共享原始 Query 和已校验分析结果，只替换历史投影。
+	promptData := map[string]any{
+		"Query":       state.input.Query,
+		"Analysis":    state.analysis,
+		"ToolHistory": baselineHistory,
+	}
+	baselinePrompt, err := renderPrompt(template, promptData)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+	promptData["ToolHistory"] = governedHistory
+	rendered, err := renderPrompt(template, promptData)
+	if err != nil {
+		return "", contextGovernanceReport{}, err
+	}
+	report.tokensBefore = estimateTokenCount(baselinePrompt)
+	report.tokensAfter = estimateTokenCount(rendered)
+	return rendered, report, nil
+}
+
 // renderToolDecisionPrompt 为当前待执行的工具决策轮次构造模型输入。
 //
 // 工具历史只通过受控 JSON 进入 Prompt；模型看不到 CapabilityToken、
@@ -105,19 +157,13 @@ func (r *ToolLoopRuntime) renderToolDecisionPrompt(
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	// 工具历史先转换成模型可见格式，再渲染模板，避免暴露内部授权字段。
-	history, err := encodeToolHistory(state.toolHistory)
+	// 使用完整历史基线和治理后历史构建同模板 Prompt，本轮只发送治理后的结果。
+	rendered, report, err := r.renderGovernedToolLoopPrompt(promptVersion.Template, state)
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	rendered, err := renderPrompt(promptVersion.Template, map[string]any{
-		"Query":       state.input.Query,
-		"Analysis":    state.analysis,
-		"ToolHistory": history,
-	})
-	if err != nil {
-		return toolLoopState{}, err
-	}
+	// 渲染成功即完成一次治理；后续模型失败时也要保留本次指标。
+	recordContextGovernance(state.execution, report)
 	// 保存本轮 Prompt，下一步模型调用只读取这个已完成的结果。
 	state.toolDecisionPrompt = rendered
 	return state, nil
@@ -165,19 +211,12 @@ func (r *ToolLoopRuntime) renderToolLoopFinalPrompt(
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	// 工具结果通过受控编码进入 Prompt，避免把内部授权字段暴露给模型。
-	history, err := encodeToolHistory(state.toolHistory)
+	// 最终回答与工具决策使用相同的治理和 Token 统计口径。
+	rendered, report, err := r.renderGovernedToolLoopPrompt(promptVersion.Template, state)
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	rendered, err := renderPrompt(promptVersion.Template, map[string]any{
-		"Query":       state.input.Query,
-		"Analysis":    state.analysis,
-		"ToolHistory": history,
-	})
-	if err != nil {
-		return toolLoopState{}, err
-	}
+	recordContextGovernance(state.execution, report)
 	state.finalPrompt = rendered
 	return state, nil
 }

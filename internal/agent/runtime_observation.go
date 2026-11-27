@@ -105,6 +105,32 @@ func recordRoute(execution *runtimeExecution, route configregistry.ModelRouteVer
 	execution.observation.Model = route.Model
 }
 
+// recordContextGovernance 将一次 Prompt 治理报告累计到当前 Run 的脱敏观测。
+//
+// 每次调用代表一次工具决策或最终回答 Prompt 构建；只有报告明确标记发生
+// 压缩、降级或省略时才增加 ContextTrimmed。Token 字段使用本地估算，不能
+// 写入供应商 Usage 或成本字段。执行锁保证并发报告不会丢失更新。
+func recordContextGovernance(
+	execution *runtimeExecution,
+	report contextGovernanceReport,
+) {
+	if execution == nil {
+		return
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	// 正常流程已在快照绑定时写入版本；这里仅为阶段级调用补充空版本，不覆盖固定值。
+	if execution.observation.ContextVersion == "" {
+		execution.observation.ContextVersion = report.contextVersion
+	}
+	execution.observation.ContextBuilds++
+	if report.trimmed {
+		execution.observation.ContextTrimmed++
+	}
+	execution.observation.ContextTokensBefore += report.tokensBefore
+	execution.observation.ContextTokensAfter += report.tokensAfter
+}
+
 func estimateCost(
 	snapshot configregistry.ConfigSnapshot,
 	provider string,

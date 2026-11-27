@@ -35,28 +35,33 @@ type ConfigReferences struct {
 // 该结构只记录模型调用的元数据和统计结果，不保存完整 Prompt、模型回答、
 // 工具参数、工具返回数据或 API Key。
 type RunObservation struct {
-	Provider         string
-	Model            string
-	Duration         time.Duration
-	Success          bool
-	StructuredValid  bool
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	Cost             float64
-	ErrorKind        string
-	MaxSteps         int    // 保存本次 Run 合并后的最大执行步数。
-	MaxToolCalls     int    // 保存本次 Run 合并后的最大工具调用次数。
-	MaxTotalTokens   int64  // 保存本次 Run 合并后的预算 Token 上限。
-	MaxDurationMS    int64  // 保存本次 Run 合并后的总时间上限，统一使用毫秒。
-	Steps            int64  // 保存已经进入执行边界的模型、工具和修复步数。
-	ToolCalls        int64  // 保存已经进入执行边界的工具调用次数。
-	BudgetTokens     int64  // 保存预算账本累计 Token，包含真实 Usage 和本地估算。
-	EstimatedTokens  int64  // 保存预算 Token 中来自本地估算的部分，不代表供应商真实用量。
-	StepsSource      string // 保存最大步数限制的来源作用域，不包含用户或租户额外信息。
-	ToolCallsSource  string // 保存工具调用次数限制的来源作用域。
-	TokensSource     string // 保存预算 Token 上限的来源作用域。
-	DurationSource   string // 保存总时间预算限制的来源作用域。
+	Provider            string
+	Model               string
+	Duration            time.Duration
+	Success             bool
+	StructuredValid     bool
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
+	Cost                float64
+	ErrorKind           string
+	MaxSteps            int    // 保存本次 Run 合并后的最大执行步数。
+	MaxToolCalls        int    // 保存本次 Run 合并后的最大工具调用次数。
+	MaxTotalTokens      int64  // 保存本次 Run 合并后的预算 Token 上限。
+	MaxDurationMS       int64  // 保存本次 Run 合并后的总时间上限，统一使用毫秒。
+	Steps               int64  // 保存已经进入执行边界的模型、工具和修复步数。
+	ToolCalls           int64  // 保存已经进入执行边界的工具调用次数。
+	BudgetTokens        int64  // 保存预算账本累计 Token，包含真实 Usage 和本地估算。
+	EstimatedTokens     int64  // 保存预算 Token 中来自本地估算的部分，不代表供应商真实用量。
+	StepsSource         string // 保存最大步数限制的来源作用域，不包含用户或租户额外信息。
+	ToolCallsSource     string // 保存工具调用次数限制的来源作用域。
+	TokensSource        string // 保存预算 Token 上限的来源作用域。
+	DurationSource      string // 保存总时间预算限制的来源作用域。
+	ContextVersion      string // 保存本次 Run 固定的上下文版本，不包含 Prompt 或工具结果。
+	ContextBuilds       int    // 累计已治理的工具决策和最终回答 Prompt 数量。
+	ContextTrimmed      int    // 累计实际发生压缩、降级或省略的 Prompt 数量。
+	ContextTokensBefore int    // 累计未治理基线 Prompt 的本地 Token 估算。
+	ContextTokensAfter  int    // 累计实际发送给模型的治理后 Prompt 本地 Token 估算。
 }
 
 // RunRecord 是一次 Agent Run 的持久化领域记录。

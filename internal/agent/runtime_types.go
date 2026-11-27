@@ -64,21 +64,26 @@ type Observer interface {
 
 // RunObservation 是一次 Runtime 执行的脱敏观测结果。
 type RunObservation struct {
-	RequestID        string
-	TenantID         string
-	RunID            string
-	ReleaseVersion   string
-	Provider         string
-	Model            string
-	Duration         time.Duration
-	Success          bool
-	StructuredValid  bool
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	Cost             float64
-	Shadow           bool
-	ErrorKind        string
+	RequestID           string
+	TenantID            string
+	RunID               string
+	ReleaseVersion      string
+	Provider            string
+	Model               string
+	Duration            time.Duration
+	Success             bool
+	StructuredValid     bool
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
+	Cost                float64
+	Shadow              bool
+	ErrorKind           string
+	ContextVersion      string // 保存本次 Run 固定的上下文算法、发布版本和治理参数标识。
+	ContextBuilds       int    // 累计已治理的工具决策和最终回答 Prompt 数量。
+	ContextTrimmed      int    // 累计实际发生压缩、降级或省略的 Prompt 数量。
+	ContextTokensBefore int    // 累计未治理基线 Prompt 的本地 Token 估算。
+	ContextTokensAfter  int    // 累计实际发送给模型的治理后 Prompt 本地 Token 估算。
 }
 
 // RuntimeConfig 是 Agent Runtime 的构造参数。

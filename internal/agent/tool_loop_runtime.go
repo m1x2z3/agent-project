@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"agent-project/internal/configregistry"
 	"agent-project/internal/modelgateway"
@@ -48,6 +49,16 @@ type ToolCallAuthorizer func(
 	structuredoutput.ToolDecision,
 ) (runner.ToolCallRequest, error)
 
+// ContextPolicy 定义 ToolLoop 构建模型 Prompt 时使用的可信上下文限制。
+//
+// 零值字段使用安全默认值；策略只控制模型输入中的工具历史投影，不修改
+// 原始工具历史、配置快照、工具执行结果或 RunStore 中的事实记录。
+type ContextPolicy struct {
+	MaxHistoryTokens    int // 可裁剪工具历史的目标 Token 上限，0 使用默认值。
+	MaxToolResultTokens int // 单个工具 Data 的压缩目标，0 使用默认值。
+	KeepLatestResults   int // 优先保留的最新工具结果数量，0 使用默认值。
+}
+
 // ToolLoopConfig 是受控多轮工具 Runtime 的依赖配置。
 //
 // Registry、Selector 和 Model 负责配置版本选择与模型调用；Executor
@@ -62,6 +73,7 @@ type ToolLoopConfig struct {
 	Observer       Observer
 	RunStore       runstore.Store
 	OnStoreError   RunStoreErrorHandler
+	ContextPolicy  ContextPolicy // 配置工具历史的模型输入投影限制，零值使用安全默认值。
 
 	MaxToolCalls int
 
@@ -89,11 +101,21 @@ var (
 	ErrLoopDetected = errors.New("agent no-progress loop detected")
 	// ErrToolHistoryEncodingFailed 表示工具历史无法编码为下一轮模型输入。
 	ErrToolHistoryEncodingFailed = errors.New("agent tool history encoding failed")
+	// ErrInvalidContextPolicy 表示上下文策略包含负数或其他不支持的限制。
+	ErrInvalidContextPolicy = errors.New("agent invalid context policy")
 )
 
 const (
 	// defaultMaxToolCalls 限制单次 Run 的工具调用次数，防止模型形成无限循环。
 	defaultMaxToolCalls = 3
+	// contextPolicyVersion 标识本地工具历史投影算法的稳定版本。
+	contextPolicyVersion = "context.v1"
+	// defaultMaxHistoryTokens 限制可裁剪工具历史进入 Prompt 的目标规模。
+	defaultMaxHistoryTokens = 12000
+	// defaultMaxToolResultTokens 限制单个工具结果的压缩目标规模。
+	defaultMaxToolResultTokens = 2560
+	// defaultKeepLatestResults 优先保留最新工具结果，避免旧历史挤掉近期证据。
+	defaultKeepLatestResults = 10
 )
 
 // ToolLoopRuntime 负责执行受控的多轮工具调用。
@@ -127,6 +149,8 @@ type ToolLoopRuntime struct {
 	onStoreError RunStoreErrorHandler
 	// maxCalls 用于限制后续动态工具循环的最大调用次数。
 	maxCalls int
+	// contextPolicy 在构造时完成校验和默认值填充，之后对所有并发 Run 只读。
+	contextPolicy ContextPolicy
 
 	analysisRepair     structuredoutput.RepairFunc
 	toolDecisionRepair structuredoutput.RepairFunc
@@ -175,10 +199,50 @@ type toolHistoryEntry struct {
 	Source []tooling.SourceRef
 }
 
+// normalizeContextPolicy 校验调用方策略并填充零值默认值。
+//
+// 返回的新值只在 Runtime 构造阶段使用；调用方传入的配置不会被原地修改，
+// 因此不同 Runtime 可以独立复用同一份配置值。
+func normalizeContextPolicy(policy ContextPolicy) (ContextPolicy, error) {
+	// 负数无法表达合法的 Token 或保留数量限制，必须在创建 Runtime 时拒绝。
+	if policy.MaxHistoryTokens < 0 ||
+		policy.MaxToolResultTokens < 0 ||
+		policy.KeepLatestResults < 0 {
+		return ContextPolicy{}, ErrInvalidContextPolicy
+	}
+	// 各字段独立填默认值，允许调用方只覆盖其中一部分限制。
+	if policy.MaxHistoryTokens == 0 {
+		policy.MaxHistoryTokens = defaultMaxHistoryTokens
+	}
+	if policy.MaxToolResultTokens == 0 {
+		policy.MaxToolResultTokens = defaultMaxToolResultTokens
+	}
+	if policy.KeepLatestResults == 0 {
+		policy.KeepLatestResults = defaultKeepLatestResults
+	}
+	return policy, nil
+}
+
+// contextVersion 生成包含算法、发布版本和实际治理参数的稳定标识。
+//
+// 调用方必须传入已规范化的策略；同一 Run 使用绑定的 ReleaseVersion，
+// 因此版本不会受执行过程中其他发布或配置修改影响。
+func (p ContextPolicy) contextVersion(releaseVersion string) string {
+	return fmt.Sprintf(
+		"%s:%s:h%d:r%d:k%d",
+		contextPolicyVersion,
+		releaseVersion,
+		p.MaxHistoryTokens,
+		p.MaxToolResultTokens,
+		p.KeepLatestResults,
+	)
+}
+
 // NewToolLoopRuntime 创建受控多轮工具 Runtime。
 //
 // 工具执行器和授权回调都是必需依赖；没有它们时，Runtime 无法保证模型
-// 输出不会绕过工具执行边界。MaxToolCalls 未设置时使用默认值 3。
+// 输出不会绕过工具执行边界。MaxToolCalls 未设置时使用默认值 3；
+// ContextPolicy 的零值字段使用安全默认值，负数会使构造失败。
 func NewToolLoopRuntime(cfg ToolLoopConfig) (*ToolLoopRuntime, error) {
 	// 这些依赖共同组成工具循环的安全边界，缺少任意一项都不能安全运行。
 	if cfg.Registry == nil ||
@@ -187,6 +251,11 @@ func NewToolLoopRuntime(cfg ToolLoopConfig) (*ToolLoopRuntime, error) {
 		cfg.Executor == nil ||
 		cfg.Authorizer == nil {
 		return nil, ErrToolLoopNotConfigured
+	}
+	// 在 Runtime 可运行前固定上下文策略，避免每次 Run 重复校验或读取可变配置。
+	contextPolicy, err := normalizeContextPolicy(cfg.ContextPolicy)
+	if err != nil {
+		return nil, err
 	}
 	// 允许调用方不提供观测器；空实现保持主流程不需要判断 nil。
 	observer := cfg.Observer
@@ -246,6 +315,7 @@ func NewToolLoopRuntime(cfg ToolLoopConfig) (*ToolLoopRuntime, error) {
 		runStore:           cfg.RunStore,
 		onStoreError:       cfg.OnStoreError,
 		maxCalls:           maxCalls,
+		contextPolicy:      contextPolicy,
 		analysisRepair:     analysisRepair,
 		toolDecisionRepair: toolDecisionRepair,
 		finalAnswerRepair:  finalAnswerRepair,
@@ -313,26 +383,37 @@ func (r *ToolLoopRuntime) Run(
 		return r.failToolLoop(ctx, input, execution, err)
 	}
 
+	// 每轮处理一个已通过结构化校验的工具决策，依次经过可信授权、重复检查、
+	// 工具执行和下一轮决策。模型返回 should_call=false 时退出循环并进入最终回答；
+	// 任一步骤失败都立即收口，确保工具执行不会绕过安全边界或形成失控循环。
 	for {
+		// 每轮开始时检查取消和截止时间，避免 Run 已终止后继续授权或执行工具。
 		if err := ctx.Err(); err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
 		}
+		// 模型明确表示不再调用工具时结束循环，由后续阶段生成最终回答。
 		if !state.toolDecision.ShouldCall {
 			break
 		}
 
+		// 授权回调把模型意图补充为可信执行请求，注入工具版本、资源范围、
+		// CapabilityToken 等模型不能自行决定的字段。
 		state, err = r.authorizeToolDecision(ctx, state)
 		if err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
 		}
+		// 使用工具名称、版本和规范化参数摘要识别重复调用，防止模型原地循环。
 		state, err = r.checkDuplicateToolCall(ctx, state)
 		if err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
 		}
+		// 只有通过授权和重复检查的请求才能进入 Executor；执行结果会追加到原始工具历史。
 		state, err = r.executeTool(ctx, state)
 		if err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
 		}
+		// 将最新工具结果重新投影到下一轮决策 Prompt，并调用、解析新的模型决策；
+		// 新决策会在下一轮重新经过完整授权和执行边界。
 		state, err = r.continueToolDecision(ctx, state)
 		if err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
@@ -437,6 +518,7 @@ func (r *ToolLoopRuntime) selectAndBindSnapshot(
 	// 复用 Run 入口的 execution，只补充本次绑定的发布版本，避免覆盖预算账本。
 	execution.mu.Lock()
 	execution.observation.ReleaseVersion = bound.ReleaseVersion
+	execution.observation.ContextVersion = r.contextPolicy.contextVersion(bound.ReleaseVersion)
 	execution.mu.Unlock()
 	// 快照绑定成功后登记 run.started，后续 model.call 和工具事件才能
 	// 追加到同一条已存在的 Run 记录；存储失败不会影响主流程。

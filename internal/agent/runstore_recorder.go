@@ -274,16 +274,21 @@ func snapshotRunObservation(execution *runtimeExecution) runstore.RunObservation
 	execution.mu.Lock()
 	defer execution.mu.Unlock()
 	observation := runstore.RunObservation{
-		Provider:         execution.observation.Provider,
-		Model:            execution.observation.Model,
-		Duration:         execution.observation.Duration,
-		Success:          execution.observation.Success,
-		StructuredValid:  execution.observation.StructuredValid,
-		PromptTokens:     execution.observation.PromptTokens,
-		CompletionTokens: execution.observation.CompletionTokens,
-		TotalTokens:      execution.observation.TotalTokens,
-		Cost:             execution.observation.Cost,
-		ErrorKind:        execution.observation.ErrorKind,
+		Provider:            execution.observation.Provider,
+		Model:               execution.observation.Model,
+		Duration:            execution.observation.Duration,
+		Success:             execution.observation.Success,
+		StructuredValid:     execution.observation.StructuredValid,
+		PromptTokens:        execution.observation.PromptTokens,
+		CompletionTokens:    execution.observation.CompletionTokens,
+		TotalTokens:         execution.observation.TotalTokens,
+		Cost:                execution.observation.Cost,
+		ErrorKind:           execution.observation.ErrorKind,
+		ContextVersion:      execution.observation.ContextVersion,
+		ContextBuilds:       execution.observation.ContextBuilds,
+		ContextTrimmed:      execution.observation.ContextTrimmed,
+		ContextTokensBefore: execution.observation.ContextTokensBefore,
+		ContextTokensAfter:  execution.observation.ContextTokensAfter,
 	}
 	if execution.budget != nil {
 		budget := execution.budget

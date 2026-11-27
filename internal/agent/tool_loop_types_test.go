@@ -2815,15 +2815,6 @@ func TestToolLoopRenderToolDecisionPrompt(t *testing.T) {
 	}
 }
 
-func TestEncodeToolHistoryRejectsInvalidData(t *testing.T) {
-	_, err := encodeToolHistory([]toolHistoryEntry{{
-		Data: []byte(`{"invalid"`),
-	}})
-	if !errors.Is(err, ErrToolHistoryEncodingFailed) {
-		t.Fatalf("encodeToolHistory() error = %v, want ErrToolHistoryEncodingFailed", err)
-	}
-}
-
 func TestToolLoopRenderToolDecisionPromptStopsWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
