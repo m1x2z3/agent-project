@@ -374,7 +374,7 @@ func TestToolLoopAnalysisMissingUsageUsesEstimate(t *testing.T) {
 		t.Fatalf("model calls = %d, want only analysis", len(model.requests))
 	}
 	analysisContent := `{"summary":"定位订单服务错误","confidence":0.9}`
-	wantUsed := int64(estimateTokenCount(model.requests[0].Messages[0].Content) + estimateTokenCount(analysisContent))
+	wantUsed := int64(estimateTokenCount(systemSecurityInstruction) + estimateTokenCount(model.requests[0].Messages[1].Content) + estimateTokenCount(analysisContent))
 	requireBudgetViolation(t, err, BudgetViolation{
 		Scope:  BudgetScopeRun,
 		Reason: "token_budget_exceeded",
@@ -415,7 +415,7 @@ func TestToolLoopDecisionMissingUsageUsesEstimate(t *testing.T) {
 		Scope:  BudgetScopeRun,
 		Reason: "token_budget_exceeded",
 		Limit:  1,
-		Used:   int64(estimateTokenCount(prompt) + estimateTokenCount(responseContent)),
+		Used:   int64(estimateTokenCount(systemSecurityInstruction) + estimateTokenCount(prompt) + estimateTokenCount(responseContent)),
 	})
 	if len(model.requests) != 1 || budget.steps != 1 {
 		t.Fatalf("model calls = %d, steps = %d, want 1 and 1", len(model.requests), budget.steps)
@@ -453,7 +453,7 @@ func TestToolLoopFinalMissingUsageUsesEstimate(t *testing.T) {
 		Scope:  BudgetScopeRun,
 		Reason: "token_budget_exceeded",
 		Limit:  1,
-		Used:   int64(estimateTokenCount(prompt) + estimateTokenCount(responseContent)),
+		Used:   int64(estimateTokenCount(systemSecurityInstruction) + estimateTokenCount(prompt) + estimateTokenCount(responseContent)),
 	})
 	if len(model.requests) != 1 || budget.steps != 1 {
 		t.Fatalf("model calls = %d, steps = %d, want 1 and 1", len(model.requests), budget.steps)

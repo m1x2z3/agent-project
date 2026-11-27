@@ -24,7 +24,7 @@ func newRuntimeForBudget(
 ) *Runtime {
 	t.Helper()
 	registry := configregistry.NewRegistry()
-	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}} / {{.Analysis.Summary}}")
+	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}} / {{.Analysis}}")
 	if err := registry.Activate("v1"); err != nil {
 		t.Fatalf("Activate() error = %v", err)
 	}
@@ -391,7 +391,11 @@ func (m *noUsageRuntimeModel) Chat(
 // TestRuntimeMissingUsageUsesEstimatedTokenBudget 验证缺失 Usage 不会绕过分析阶段预算。
 func TestRuntimeMissingUsageUsesEstimatedTokenBudget(t *testing.T) {
 	const analysisContent = `{"summary":"定位订单服务错误","confidence":0.9}`
-	analysisEstimate := estimateTokenCount("分析：问题") + estimateTokenCount(analysisContent)
+	queryEnvelope, err := marshalUserInputEnvelope("v1", "问题")
+	if err != nil {
+		t.Fatalf("marshalUserInputEnvelope() error = %v", err)
+	}
+	analysisEstimate := estimateTokenCount(systemSecurityInstruction) + estimateTokenCount("分析："+queryEnvelope) + estimateTokenCount(analysisContent)
 	tests := []struct {
 		name  string // 描述当前缺失 Usage 的预算场景。
 		limit int    // 保存当前 Run 的 Token 上限。
@@ -414,7 +418,7 @@ func TestRuntimeMissingUsageUsesEstimatedTokenBudget(t *testing.T) {
 				Query:     "问题",
 			}
 
-			_, err := runtime.Run(context.Background(), input)
+			_, err = runtime.Run(context.Background(), input)
 			requireBudgetViolation(t, err, BudgetViolation{
 				Scope:  BudgetScopeRun,
 				Reason: "token_budget_exceeded",
@@ -458,8 +462,18 @@ func TestRuntimeMissingUsageUsesEstimatedTokenBudget(t *testing.T) {
 func TestRuntimeFinalMissingUsageUsesEstimatedTokenBudget(t *testing.T) {
 	const analysisContent = `{"summary":"定位订单服务错误","confidence":0.9}`
 	const finalContent = `{"status":"answered","answer":"已定位"}`
-	analysisEstimate := estimateTokenCount("分析：问题") + estimateTokenCount(analysisContent)
-	finalEstimate := estimateTokenCount("回答：问题 / 定位订单服务错误") + estimateTokenCount(finalContent)
+	queryEnvelope, err := marshalUserInputEnvelope("v1", "问题")
+	if err != nil {
+		t.Fatalf("marshalUserInputEnvelope() error = %v", err)
+	}
+	analysisEnvelope, err := marshalModelOutputEnvelope("v1", structuredoutput.TaskAnalysis{
+		Summary: "定位订单服务错误", Confidence: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("marshalModelOutputEnvelope() error = %v", err)
+	}
+	analysisEstimate := estimateTokenCount(systemSecurityInstruction) + estimateTokenCount("分析："+queryEnvelope) + estimateTokenCount(analysisContent)
+	finalEstimate := estimateTokenCount(systemSecurityInstruction) + estimateTokenCount("回答："+queryEnvelope+" / "+analysisEnvelope) + estimateTokenCount(finalContent)
 	totalEstimate := analysisEstimate + finalEstimate
 
 	tests := []struct {
@@ -484,7 +498,7 @@ func TestRuntimeFinalMissingUsageUsesEstimatedTokenBudget(t *testing.T) {
 				Query:     "问题",
 			}
 
-			_, err := runtime.Run(context.Background(), input)
+			_, err = runtime.Run(context.Background(), input)
 			if tt.wantError {
 				requireBudgetViolation(t, err, BudgetViolation{
 					Scope:  BudgetScopeRun,

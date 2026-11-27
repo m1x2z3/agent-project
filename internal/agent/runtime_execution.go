@@ -94,7 +94,7 @@ func (r *ToolLoopRuntime) prepareExecution(
 // 各阶段通过这些字段保留原有任务身份、模型输入和错误分类。
 type runtimeModelCall struct {
 	task             string // 当前模型调用所属任务，同时作为快照路由与观测的任务键。
-	prompt           string // 当前阶段已经渲染并允许发送给模型的 Prompt。
+	prompt           string // 当前阶段已渲染的任务 user 内容；固定 system 由共享内核独立添加。
 	budgetStage      string // 模型调用前预算检查失败时的运行阶段标识。
 	tokenBudgetStage string // 模型返回后 Token 结算失败时的运行阶段标识。
 	modelStage       string // 模型供应商调用失败时的运行阶段标识。
@@ -150,7 +150,10 @@ func invokeModelWithinBudget(
 		Temperature: float64Pointer(route.Temperature),
 		MaxTokens:   maxTokensPointer(maxTokens),
 		Timeout:     callTimeout,
-		Messages:    []modelgateway.Message{{Role: "user", Content: call.prompt}},
+		Messages: []modelgateway.Message{
+			{Role: "system", Content: systemSecurityInstruction},
+			{Role: "user", Content: call.prompt},
+		},
 	})
 	if callContext.execution != nil && callContext.execution.recorder != nil {
 		callContext.execution.recorder.recordModelCall(
@@ -173,8 +176,8 @@ func invokeModelWithinBudget(
 			return modelgateway.ChatResponse{}, runtimeFailure(call.tokenBudgetStage, budgetErr)
 		}
 	} else {
-		// 供应商未返回 Usage 时按实际 Prompt 和响应文本估算，不能将本次调用记为零消耗。
-		used := estimateTokenCount(call.prompt) + estimateTokenCount(response.Message.Content)
+		// 供应商未返回 Usage 时按实际 system、任务 user 和响应文本估算，不能将本次调用记为零消耗。
+		used := estimateModelRequestTokens(call.prompt) + estimateTokenCount(response.Message.Content)
 		if budgetErr := callContext.execution.budget.ChargeEstimatedTokens(used); budgetErr != nil {
 			return modelgateway.ChatResponse{}, runtimeFailure(call.tokenBudgetStage, budgetErr)
 		}
@@ -186,6 +189,13 @@ func invokeModelWithinBudget(
 		)
 	}
 	return response, nil
+}
+
+// estimateModelRequestTokens 为固定 system 与任务 user 消息提供统一本地估算。
+// 它只用于供应商缺少 Usage 时的预算结算和上下文治理观测；真实 Usage、
+// 成本和模型调用次数不能叠加这部分本地估算。
+func estimateModelRequestTokens(taskPrompt string) int {
+	return estimateTokenCount(systemSecurityInstruction) + estimateTokenCount(taskPrompt)
 }
 
 // callModelWithinBudget 从工具循环状态提取公共依赖，复用共享模型调用内核。

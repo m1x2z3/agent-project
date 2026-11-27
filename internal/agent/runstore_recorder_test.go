@@ -340,6 +340,8 @@ func TestRunStoreRecorderFinishesSuccessfulRun(t *testing.T) {
 			CompletionTokens: 2,
 			TotalTokens:      6,
 			Cost:             0.01,
+			SecurityVersion:  "security.v1:v1",
+			SecurityChecks:   3,
 		},
 	}
 	input := RunInput{RequestID: "request-1", TenantID: "tenant-1", RunID: "run-1"}
@@ -360,6 +362,10 @@ func TestRunStoreRecorderFinishesSuccessfulRun(t *testing.T) {
 			store.finishedStatus,
 			store.finishedObservation,
 		)
+	}
+	if store.finishedObservation.SecurityVersion != "security.v1:v1" ||
+		store.finishedObservation.SecurityChecks != 3 {
+		t.Fatalf("finished security observation = %+v", store.finishedObservation)
 	}
 }
 

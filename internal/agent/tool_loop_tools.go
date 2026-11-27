@@ -133,6 +133,48 @@ func (r *ToolLoopRuntime) authorizeToolDecision(
 	return state, nil
 }
 
+// checkToolCallSecurity 在授权之后、预算和执行之前完成只读契约及安全门禁。
+//
+// Executor.Inspect 会提前发现工具发现、参数 Schema、权限和审批等契约问题；
+// ErrApprovalRequired 转换为本日稳定的危险请求错误，同时保留底层审批原因。
+// 其他契约错误继续沿用 ErrToolExecutionFailed 分类，不冒充安全策略命中。
+func (r *ToolLoopRuntime) checkToolCallSecurity(
+	ctx context.Context,
+	state toolLoopState,
+) (toolLoopState, error) {
+	if err := ctx.Err(); err != nil {
+		return toolLoopState{}, err
+	}
+	if !state.toolDecision.ShouldCall {
+		return state, nil
+	}
+	if r == nil || r.executor == nil {
+		return state, runtimeFailure("tool_loop_tool_security", ErrToolExecutionFailed)
+	}
+	definition, err := r.executor.Inspect(ctx, state.toolCallRequest)
+	if err != nil {
+		if errors.Is(err, tooling.ErrApprovalRequired) {
+			// 审批拒绝已经完成一次确定性的危险工具检查；其他契约错误不计安全检查。
+			securityErr := fmt.Errorf("%w: %w", ErrDangerousToolRequest, err)
+			recordSecurityCheck(state.execution)
+			recordSecurityBlock(state.execution, securityErr)
+			return state, runtimeFailure("tool_loop_tool_security", securityErr)
+		}
+		return state, runtimeFailure(
+			"tool_loop_tool_security",
+			fmt.Errorf("%w: %w", ErrToolExecutionFailed, err),
+		)
+	}
+	// 普通契约通过后，危险能力与数据流合并计为一次执行前安全检查。
+	recordSecurityCheck(state.execution)
+	// 注册定义只用于本地判断；普通 Capability Token 不能放行保留的网络出站能力。
+	if err := inspectToolRequestSecurity(definition, state.externalContentSeen); err != nil {
+		recordSecurityBlock(state.execution, err)
+		return state, runtimeFailure("tool_loop_tool_security", err)
+	}
+	return state, nil
+}
+
 // checkDuplicateToolCall 检查当前调用是否已经在本次 Run 中执行过。
 //
 // 工具名、显式版本和参数摘要共同构成一次调用的逻辑标识；只有三者
@@ -284,6 +326,16 @@ func (r *ToolLoopRuntime) executeTool(
 	}
 	callStarted := recording.ClockFromContext(ctx).Now()
 	result, err := r.executor.Execute(ctx, state.toolCallRequest)
+	// 对原始 Data/Source 立即生成脱敏报告，不在命中时提前返回；下面仍需保留
+	// 已经发生的真实工具结果和历史。执行错误优先沿用原失败，不再做内容判断。
+	injectionReport := promptInjectionReport{}
+	if err == nil {
+		injectionReport = inspectToolResultPromptInjection(result)
+		// 每个成功返回的工具结果只联合检查一次 Data/Source，包括空内容和业务失败。
+		recordSecurityCheck(state.execution)
+		// 污染状态只在真实执行成功后更新；业务失败但没有 Data/Source 不制造污染。
+		state.externalContentSeen = state.externalContentSeen || toolResultContainsExternalContent(result)
+	}
 	status, errorCode := toolExecutionEventStatus(result, err)
 	if state.execution != nil && state.execution.recorder != nil {
 		state.execution.recorder.recordToolResult(
@@ -312,6 +364,11 @@ func (r *ToolLoopRuntime) executeTool(
 			"tool_loop_execute",
 			fmt.Errorf("%w: %w", ErrToolExecutionFailed, err),
 		)
+	}
+	if injectionReport.blocked() {
+		// 工具事实已经保留，但攻击内容不得进入压缩、Prompt、下一次模型或后续工具。
+		recordSecurityBlock(state.execution, ErrPromptInjectionDetected)
+		return state, runtimeFailure("tool_loop_tool_result_security", ErrPromptInjectionDetected)
 	}
 	return state, nil
 }
@@ -357,7 +414,8 @@ func toolHistoryEntryFromExecution(
 	}
 
 	entry := toolHistoryEntry{
-		Record: record,
+		Record:            record,
+		ResultContentKind: result.ResultContentKind,
 	}
 	if len(result.Data) > 0 && json.Valid(result.Data) {
 		entry.Data = append(json.RawMessage(nil), result.Data...)
@@ -487,25 +545,36 @@ type promptSourceRef struct {
 	Location string `json:"location"`
 }
 
+// promptToolResultContent 把 Data 和 Source 放在同一个不可信内容投影中。
+// 两个字段都不携带授权语义，外部正文也不能覆盖所属历史的可信标签。
+type promptToolResultContent struct {
+	Data   json.RawMessage   `json:"data,omitempty"`
+	Source []promptSourceRef `json:"source,omitempty"`
+}
+
 // promptHistoryEntry 是允许进入模型 Prompt 的单条工具历史投影。
 //
 // 字段必须显式列出，不能直接序列化内部 toolHistoryEntry，避免未来新增的
-// 授权或执行字段意外暴露给模型。
+// 授权或执行字段意外暴露给模型。Trust 由 Runtime 固定写入，ContentKind 只能
+// 从注册工具定义转换，不能读取 Data、Source 或工具正文中的伪造声明。
 type promptHistoryEntry struct {
-	ToolName        string            `json:"tool_name"`
-	ToolVersion     string            `json:"tool_version"`
-	Status          string            `json:"status"`
-	ErrorCode       string            `json:"error_code,omitempty"`
-	ArgumentsDigest string            `json:"arguments_digest"`
-	Data            json.RawMessage   `json:"data,omitempty"`
-	Source          []promptSourceRef `json:"source,omitempty"`
+	ToolName        string                  `json:"tool_name"`
+	ToolVersion     string                  `json:"tool_version"`
+	Status          string                  `json:"status"`
+	ErrorCode       string                  `json:"error_code,omitempty"`
+	ArgumentsDigest string                  `json:"arguments_digest"`
+	Trust           trustLevel              `json:"trust"`
+	ContentKind     contentKind             `json:"content_kind"`
+	Content         promptToolResultContent `json:"content"`
 }
 
-// promptHistoryEnvelope 为模型说明历史版本和裁剪情况，避免把投影误认为完整历史。
+// promptHistoryEnvelope 为模型说明安全版本、历史治理版本和裁剪情况。
+// 两套版本分别标识安全标签算法与历史治理算法，不能相互替代。
 type promptHistoryEnvelope struct {
-	ContextVersion string               `json:"context_version"`
-	OmittedEntries int                  `json:"omitted_entries"`
-	Entries        []promptHistoryEntry `json:"entries"`
+	SecurityVersion string               `json:"security_version"`
+	ContextVersion  string               `json:"context_version"`
+	OmittedEntries  int                  `json:"omitted_entries"`
+	Entries         []promptHistoryEntry `json:"entries"`
 }
 
 // projectToolHistory 将内部工具历史复制为独立的模型可见条目。
@@ -515,24 +584,30 @@ type promptHistoryEnvelope struct {
 func projectToolHistory(history []toolHistoryEntry) ([]promptHistoryEntry, error) {
 	entries := make([]promptHistoryEntry, 0, len(history))
 	for _, entry := range history {
-		// 只映射允许进入 Prompt 的脱敏元数据。
+		kind, err := contentKindFromToolResult(entry.ResultContentKind)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrToolHistoryEncodingFailed, err)
+		}
+		// 只映射允许进入 Prompt 的脱敏元数据和代码固定的外部内容标签。
 		promptEntry := promptHistoryEntry{
 			ToolName:        entry.Record.ToolName,
 			ToolVersion:     entry.Record.ToolVersion,
 			Status:          string(entry.Record.Status),
 			ErrorCode:       entry.Record.ErrorCode,
 			ArgumentsDigest: entry.Record.ArgumentsDigest,
+			Trust:           trustUntrustedExternal,
+			ContentKind:     kind,
 		}
 		if len(entry.Data) > 0 {
 			if !json.Valid(entry.Data) {
 				return nil, fmt.Errorf("%w: invalid tool data", ErrToolHistoryEncodingFailed)
 			}
-			promptEntry.Data = append(json.RawMessage(nil), entry.Data...)
+			promptEntry.Content.Data = append(json.RawMessage(nil), entry.Data...)
 		}
 		if len(entry.Source) > 0 {
-			promptEntry.Source = make([]promptSourceRef, 0, len(entry.Source))
+			promptEntry.Content.Source = make([]promptSourceRef, 0, len(entry.Source))
 			for _, source := range entry.Source {
-				promptEntry.Source = append(promptEntry.Source, promptSourceRef{
+				promptEntry.Content.Source = append(promptEntry.Content.Source, promptSourceRef{
 					Source:   source.Source,
 					Location: source.Location,
 				})
@@ -546,16 +621,31 @@ func projectToolHistory(history []toolHistoryEntry) ([]promptHistoryEntry, error
 // marshalToolHistoryEnvelope 编码带上下文版本和省略数量的历史投影。
 func marshalToolHistoryEnvelope(
 	entries []promptHistoryEntry,
+	runSecurityVersion string,
 	contextVersion string,
 	omittedEntries int,
 ) (string, error) {
 	if entries == nil {
 		entries = make([]promptHistoryEntry, 0)
 	}
+	if runSecurityVersion == "" {
+		return "", fmt.Errorf("%w: missing security version", ErrToolHistoryEncodingFailed)
+	}
+	for _, entry := range entries {
+		switch entry.ContentKind {
+		case contentKindToolResult, contentKindDocument, contentKindLog, contentKindIssue:
+		default:
+			return "", fmt.Errorf("%w: invalid tool result kind", ErrToolHistoryEncodingFailed)
+		}
+		if entry.Trust != trustUntrustedExternal {
+			return "", fmt.Errorf("%w: invalid tool result trust", ErrToolHistoryEncodingFailed)
+		}
+	}
 	data, err := json.Marshal(promptHistoryEnvelope{
-		ContextVersion: contextVersion,
-		OmittedEntries: omittedEntries,
-		Entries:        entries,
+		SecurityVersion: runSecurityVersion,
+		ContextVersion:  contextVersion,
+		OmittedEntries:  omittedEntries,
+		Entries:         entries,
 	})
 	if err != nil {
 		return "", fmt.Errorf("%w: marshal tool history", ErrToolHistoryEncodingFailed)
@@ -596,21 +686,21 @@ func encodeGovernedToolHistory(
 		failed := entries[index].ErrorCode != "" ||
 			(entries[index].Status != "" && entries[index].Status != string(tooling.ResultSuccess))
 		critical[index] = index >= latestStart || failed
-		if len(entries[index].Data) == 0 {
+		if len(entries[index].Content.Data) == 0 {
 			continue
 		}
 		compressed, didCompress, err := compressToolResultData(
-			entries[index].Data,
+			entries[index].Content.Data,
 			normalized.MaxToolResultTokens,
 		)
 		if err != nil {
 			return "", contextGovernanceReport{}, err
 		}
-		entries[index].Data = compressed
+		entries[index].Content.Data = compressed
 		report.trimmed = report.trimmed || didCompress
 	}
 
-	encoded, err := marshalToolHistoryEnvelope(entries, report.contextVersion, 0)
+	encoded, err := marshalToolHistoryEnvelope(entries, securityVersion(releaseVersion), report.contextVersion, 0)
 	if err != nil {
 		return "", contextGovernanceReport{}, err
 	}
@@ -618,10 +708,10 @@ func encodeGovernedToolHistory(
 	for estimateTokenCount(encoded) > normalized.MaxHistoryTokens {
 		degraded := false
 		for index := range entries {
-			if critical[index] || len(entries[index].Data) == 0 {
+			if critical[index] || len(entries[index].Content.Data) == 0 {
 				continue
 			}
-			entries[index].Data = nil
+			entries[index].Content.Data = nil
 			report.trimmed = true
 			degraded = true
 			break
@@ -629,7 +719,7 @@ func encodeGovernedToolHistory(
 		if !degraded {
 			break
 		}
-		encoded, err = marshalToolHistoryEnvelope(entries, report.contextVersion, 0)
+		encoded, err = marshalToolHistoryEnvelope(entries, securityVersion(releaseVersion), report.contextVersion, 0)
 		if err != nil {
 			return "", contextGovernanceReport{}, err
 		}
@@ -652,7 +742,7 @@ func encodeGovernedToolHistory(
 		critical = append(critical[:oldest], critical[oldest+1:]...)
 		omittedEntries++
 		report.trimmed = true
-		encoded, err = marshalToolHistoryEnvelope(entries, report.contextVersion, omittedEntries)
+		encoded, err = marshalToolHistoryEnvelope(entries, securityVersion(releaseVersion), report.contextVersion, omittedEntries)
 		if err != nil {
 			return "", contextGovernanceReport{}, err
 		}

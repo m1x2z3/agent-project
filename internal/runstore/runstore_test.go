@@ -217,6 +217,8 @@ func TestRunObservationStoresSanitizedRuntimeMetadata(t *testing.T) {
 		CompletionTokens: 40,
 		TotalTokens:      120,
 		Cost:             0.003,
+		SecurityVersion:  "security.v1:release-v1",
+		SecurityChecks:   3,
 	}
 
 	if observation.Provider != "deepseek" || observation.Model != "deepseek-chat" {
@@ -233,21 +235,33 @@ func TestRunObservationStoresSanitizedRuntimeMetadata(t *testing.T) {
 	if !observation.Success || !observation.StructuredValid {
 		t.Fatalf("successful observation = %+v", observation)
 	}
+	if observation.SecurityVersion != "security.v1:release-v1" || observation.SecurityChecks != 3 ||
+		observation.SecurityBlocks != 0 {
+		t.Fatalf("security observation = %+v", observation)
+	}
 }
 
 func TestRunObservationCanRepresentFailureMetadata(t *testing.T) {
 	observation := RunObservation{
-		Provider:  "kimi",
-		Model:     "moonshot-v1",
-		Duration:  2 * time.Second,
-		ErrorKind: "timeout",
+		Provider:        "kimi",
+		Model:           "moonshot-v1",
+		Duration:        2 * time.Second,
+		ErrorKind:       "security_data_exfiltration",
+		SecurityVersion: "security.v1:release-v1",
+		SecurityChecks:  4,
+		SecurityBlocks:  1,
+		DataFlowBlocks:  1,
 	}
 
 	if observation.Success {
 		t.Fatal("failed observation must not be marked successful")
 	}
-	if observation.ErrorKind != "timeout" {
-		t.Fatalf("error kind = %q, want timeout", observation.ErrorKind)
+	if observation.ErrorKind != "security_data_exfiltration" {
+		t.Fatalf("error kind = %q, want security_data_exfiltration", observation.ErrorKind)
+	}
+	if observation.SecurityVersion != "security.v1:release-v1" || observation.SecurityChecks != 4 ||
+		observation.SecurityBlocks != 1 || observation.DataFlowBlocks != 1 {
+		t.Fatalf("security failure observation = %+v", observation)
 	}
 }
 

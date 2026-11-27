@@ -399,8 +399,8 @@ func TestToolLoopRunExecutesToolThenProducesFinalAnswer(t *testing.T) {
 		model.requests[3].Task != finalTask {
 		t.Fatalf("model request tasks = %+v", model.requests)
 	}
-	if !strings.Contains(model.requests[2].Messages[0].Content, "doc-1") {
-		t.Fatalf("next decision prompt omitted tool result: %s", model.requests[2].Messages[0].Content)
+	if !strings.Contains(model.requests[2].Messages[1].Content, "doc-1") {
+		t.Fatalf("next decision prompt omitted tool result: %s", model.requests[2].Messages[1].Content)
 	}
 	// 最终输出只保留工具调用摘要，不应暴露完整参数或工具返回全文。
 	outputJSON, err := json.Marshal(output)
@@ -581,17 +581,10 @@ func TestToolLoopRunStoreRecordsToolResolutionFailure(t *testing.T) {
 		runstore.EventRunStarted,
 		runstore.EventModelCall,
 		runstore.EventModelCall,
-		runstore.EventToolCall,
-		runstore.EventToolResult,
 		runstore.EventRunFailed,
 	}
 	assertToolLoopEventTypes(t, events, wantTypes)
-	if events[4].Status != string(tooling.ResultNotFound) ||
-		events[4].ErrorKind != "tool_not_found" ||
-		events[4].ArgumentsDigest == "" ||
-		events[4].ResultDigest == "" {
-		t.Fatalf("tool failure event = %+v", events[4])
-	}
+	// 工具解析属于执行前只读预检，失败时不得伪造 tool.call/tool.result 事实。
 	assertToolLoopEventsRedacted(t, events, input.Query, "sensitive-query")
 
 	record, err := store.GetRun(context.Background(), input.RunID)
@@ -670,6 +663,11 @@ func TestToolLoopRunStoreRecordsToolExecutionFailure(t *testing.T) {
 	if record.Status != runstore.RunFailed ||
 		record.Config.ReleaseVersion != "v1" {
 		t.Fatalf("stored failed run = %+v", record)
+	}
+	// 执行器错误优先：保留 Query 和执行前检查，但不增加结果检查或安全拦截。
+	if record.Observation.SecurityVersion != "security.v1:v1" ||
+		record.Observation.SecurityChecks != 2 || record.Observation.SecurityBlocks != 0 {
+		t.Fatalf("tool execution failure security observation = %+v", record.Observation)
 	}
 }
 
@@ -1351,7 +1349,7 @@ func toolLoopSnapshot(version string) configregistry.ConfigSnapshot {
 	snapshot.Prompts[toolDecisionPromptName] = configregistry.PromptVersion{
 		Name:     toolDecisionPromptName,
 		Version:  "prompt.tool_decision.v1",
-		Template: "tool decision {{.Query}} {{.Analysis.Summary}} {{.ToolHistory}}",
+		Template: "tool decision {{.Query}} {{.Analysis}} {{.ToolHistory}}",
 	}
 	snapshot.Schemas[toolDecisionTask] = configregistry.SchemaVersion{
 		Kind:    toolDecisionTask,
@@ -1423,6 +1421,9 @@ func TestToolLoopSelectAndBindSnapshotUsesSelectedRelease(t *testing.T) {
 	}
 	if state.snapshot.ReleaseVersion != "v2" {
 		t.Fatalf("snapshot release = %q, want v2", state.snapshot.ReleaseVersion)
+	}
+	if state.execution.securityVersion != "security.v1:v2" {
+		t.Fatalf("security version = %q, want security.v1:v2", state.execution.securityVersion)
 	}
 	bound, err := configStore.GetRunSnapshot("run-tool-loop")
 	if err != nil {
@@ -1541,7 +1542,7 @@ func TestToolLoopRunAnalysisReusesBoundSnapshot(t *testing.T) {
 	if len(model.requests) != 1 ||
 		model.requests[0].Task != analysisTask ||
 		model.requests[0].Model != "fake-task_analysis" ||
-		!strings.Contains(model.requests[0].Messages[0].Content, "订单服务错误") {
+		!strings.Contains(model.requests[0].Messages[1].Content, "订单服务错误") {
 		t.Fatalf("analysis model request = %+v", model.requests)
 	}
 }
@@ -1619,7 +1620,7 @@ func TestToolLoopCallAndDecodeToolDecision(t *testing.T) {
 		model.requests[0].Task != toolDecisionTask ||
 		model.requests[0].Provider != "fake" ||
 		model.requests[0].Model != "fake-tool_decision" ||
-		!strings.Contains(model.requests[0].Messages[0].Content, "查询订单服务文档") {
+		!strings.Contains(model.requests[0].Messages[1].Content, "查询订单服务文档") {
 		t.Fatalf("tool decision model request = %+v", model.requests)
 	}
 }
@@ -2477,6 +2478,7 @@ type blockingToolLoopTestTool struct {
 
 type errorToolLoopTestTool struct {
 	definition tooling.ToolDefinition
+	result     tooling.ToolResult
 	err        error
 }
 
@@ -2488,7 +2490,7 @@ func (t *errorToolLoopTestTool) Execute(
 	_ context.Context,
 	_ tooling.ToolExecutionRequest,
 ) (tooling.ToolResult, error) {
-	return tooling.ToolResult{}, t.err
+	return t.result, t.err
 }
 
 func (t *blockingToolLoopTestTool) Definition() tooling.ToolDefinition {
@@ -2863,7 +2865,7 @@ func TestToolLoopContinueToolDecisionReturnsToolResultToModel(t *testing.T) {
 	if len(model.requests) != 1 {
 		t.Fatalf("model requests = %d, want 1", len(model.requests))
 	}
-	prompt := model.requests[0].Messages[0].Content
+	prompt := model.requests[0].Messages[1].Content
 	for _, expected := range []string{
 		"查询订单服务文档",
 		"订单服务错误排查",
@@ -2896,7 +2898,7 @@ func TestToolLoopRenderFinalPromptUsesAnalysisAndToolHistory(t *testing.T) {
 	snapshot.Prompts[finalPromptName] = configregistry.PromptVersion{
 		Name:     finalPromptName,
 		Version:  "prompt.final.v1",
-		Template: "final {{.Query}} {{.Analysis.Summary}} {{.ToolHistory}}",
+		Template: "final {{.Query}} {{.Analysis}} {{.ToolHistory}}",
 	}
 	state, err := (&ToolLoopRuntime{}).renderToolLoopFinalPrompt(context.Background(), toolLoopState{
 		input: RunInput{
@@ -2965,7 +2967,7 @@ func TestToolLoopCallFinalModelUsesSnapshotRoute(t *testing.T) {
 	if request.Task != finalTask ||
 		request.Provider != "fake" ||
 		request.Model != "fake-final_answer" ||
-		request.Messages[0].Content != "请根据工具结果回答" {
+		request.Messages[1].Content != "请根据工具结果回答" {
 		t.Fatalf("final model request = %+v", request)
 	}
 }

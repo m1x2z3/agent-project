@@ -168,23 +168,27 @@ type toolLoopState struct {
 	// snapshot 在绑定后固定不变，后续所有 Prompt、Schema 和路由都从这里读取。
 	snapshot configregistry.ConfigSnapshot
 	// 分析阶段状态。
-	analysisPrompt   string
-	analysisResponse modelgateway.ChatResponse
-	analysis         structuredoutput.TaskAnalysis
-	analysisReport   structuredoutput.DecodeReport
+	analysisPrompt       string
+	analysisResponse     modelgateway.ChatResponse
+	analysisContentTrust trustLevel // 原始分析和结构化 TaskAnalysis 始终是不可信模型内容。
+	analysis             structuredoutput.TaskAnalysis
+	analysisReport       structuredoutput.DecodeReport
 	// 工具循环历史和当前工具决策阶段状态。
-	toolHistory          []toolHistoryEntry
-	toolDecisionPrompt   string
-	toolDecisionDigests  []string // 按顺序保存当前 Run 的执行阶段与决策摘要，用于识别重复模型状态。
-	toolDecisionResponse modelgateway.ChatResponse
-	toolDecision         structuredoutput.ToolDecision
-	toolDecisionReport   structuredoutput.DecodeReport
+	toolHistory              []toolHistoryEntry
+	externalContentSeen      bool // 当前 Run 已成功接收含非空 Data 或 Source 的不可信外部结果。
+	toolDecisionPrompt       string
+	toolDecisionDigests      []string // 按顺序保存当前 Run 的执行阶段与决策摘要，用于识别重复模型状态。
+	toolDecisionResponse     modelgateway.ChatResponse
+	toolDecisionContentTrust trustLevel // 原始工具决策及解析后的 ToolDecision 始终是不可信模型意图。
+	toolDecision             structuredoutput.ToolDecision
+	toolDecisionReport       structuredoutput.DecodeReport
 	// 授权成功后保存的请求，供后续 Executor.Execute 使用。
 	toolCallRequest     runner.ToolCallRequest
 	toolArgumentsDigest string
 	// 最终回答阶段状态。
 	finalPrompt       string
 	finalResponse     modelgateway.ChatResponse
+	finalContentTrust trustLevel // 原始最终响应及解析后的 FinalAnswer 始终是不可信模型内容。
 	finalAnswer       structuredoutput.FinalAnswer
 	finalAnswerReport structuredoutput.DecodeReport
 }
@@ -194,9 +198,10 @@ type toolLoopState struct {
 // Data 和 Source 是工具返回的结构化结果，供模型继续判断；
 // ToolCallRecord 只保留脱敏摘要，最终不会把完整工具数据放入 RunOutput。
 type toolHistoryEntry struct {
-	Record ToolCallRecord
-	Data   json.RawMessage
-	Source []tooling.SourceRef
+	Record            ToolCallRecord
+	Data              json.RawMessage
+	Source            []tooling.SourceRef
+	ResultContentKind tooling.ResultContentKind // 来自注册工具定义，而不是工具返回正文。
 }
 
 // normalizeContextPolicy 校验调用方策略并填充零值默认值。
@@ -324,7 +329,7 @@ func NewToolLoopRuntime(cfg ToolLoopConfig) (*ToolLoopRuntime, error) {
 
 // Run 执行一次受控多轮工具循环。
 //
-// 每轮工具决策都必须经过结构化解析、可信授权、重复检查和次数限制；
+// 每轮工具决策都必须经过结构化解析、可信授权、只读安全检查、重复检查和次数限制；
 // 只有工具结果被追加到历史后，模型才有机会发起下一轮决策。模型决定
 // 不再调用工具时，流程转入最终回答阶段。所有成功和失败路径都会提交
 // 一次脱敏观测。
@@ -402,12 +407,17 @@ func (r *ToolLoopRuntime) Run(
 		if err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
 		}
+		// 只读预检和 Run 级安全门禁必须先于重复检查、预算记账及任何执行事件。
+		state, err = r.checkToolCallSecurity(ctx, state)
+		if err != nil {
+			return r.failToolLoop(ctx, input, execution, err)
+		}
 		// 使用工具名称、版本和规范化参数摘要识别重复调用，防止模型原地循环。
 		state, err = r.checkDuplicateToolCall(ctx, state)
 		if err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
 		}
-		// 只有通过授权和重复检查的请求才能进入 Executor；执行结果会追加到原始工具历史。
+		// 只有通过授权、安全门禁和重复检查的请求才能进入 Executor；执行结果会追加到原始工具历史。
 		state, err = r.executeTool(ctx, state)
 		if err != nil {
 			return r.failToolLoop(ctx, input, execution, err)
@@ -519,6 +529,8 @@ func (r *ToolLoopRuntime) selectAndBindSnapshot(
 	execution.mu.Lock()
 	execution.observation.ReleaseVersion = bound.ReleaseVersion
 	execution.observation.ContextVersion = r.contextPolicy.contextVersion(bound.ReleaseVersion)
+	execution.securityVersion = securityVersion(bound.ReleaseVersion)
+	execution.observation.SecurityVersion = execution.securityVersion
 	execution.mu.Unlock()
 	// 快照绑定成功后登记 run.started，后续 model.call 和工具事件才能
 	// 追加到同一条已存在的 Run 记录；存储失败不会影响主流程。

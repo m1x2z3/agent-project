@@ -303,9 +303,9 @@ func TestEncodeGovernedToolHistoryShortHistory(t *testing.T) {
 		entry.ToolVersion != "v1" ||
 		entry.Status != string(tooling.ResultSuccess) ||
 		entry.ArgumentsDigest != "sha256:old-0" ||
-		len(entry.Data) == 0 ||
-		len(entry.Source) != 1 ||
-		entry.Source[0].Source != "source-old-0" {
+		len(entry.Content.Data) == 0 ||
+		len(entry.Content.Source) != 1 ||
+		entry.Content.Source[0].Source != "source-old-0" {
 		t.Fatalf("preserved history entry = %+v", entry)
 	}
 	if !reflect.DeepEqual(history, original) {
@@ -349,7 +349,7 @@ func TestEncodeGovernedToolHistoryCompression(t *testing.T) {
 	var data struct {
 		Compressed bool `json:"compressed"`
 	}
-	if err := json.Unmarshal(entry.Data, &data); err != nil {
+	if err := json.Unmarshal(entry.Content.Data, &data); err != nil {
 		t.Fatalf("Unmarshal(data) error = %v", err)
 	}
 	if !data.Compressed ||
@@ -358,10 +358,10 @@ func TestEncodeGovernedToolHistoryCompression(t *testing.T) {
 		entry.Status != string(tooling.ResultTimeout) ||
 		entry.ErrorCode != "timeout" ||
 		entry.ArgumentsDigest != "sha256:arguments" ||
-		len(entry.Source) != 1 ||
-		entry.Source[0].Source != "project_docs" ||
-		entry.Source[0].Location != "project-a/doc-1" {
-		t.Fatalf("compressed history entry = %+v, data = %s", entry, entry.Data)
+		len(entry.Content.Source) != 1 ||
+		entry.Content.Source[0].Source != "project_docs" ||
+		entry.Content.Source[0].Location != "project-a/doc-1" {
+		t.Fatalf("compressed history entry = %+v, data = %s", entry, entry.Content.Data)
 	}
 	if !reflect.DeepEqual(history, original) {
 		t.Fatal("compression changed the original tool history")
@@ -413,11 +413,11 @@ func TestEncodeGovernedToolHistoryDegradesBeforeOmitting(t *testing.T) {
 		t.Fatalf("degraded envelope = %+v, report = %+v", envelope, report)
 	}
 	for index := 0; index < len(history)-1; index++ {
-		if len(envelope.Entries[index].Data) != 0 {
-			t.Fatalf("old entry %d retained Data at degraded budget: %s", index, envelope.Entries[index].Data)
+		if len(envelope.Entries[index].Content.Data) != 0 {
+			t.Fatalf("old entry %d retained Data at degraded budget: %s", index, envelope.Entries[index].Content.Data)
 		}
 	}
-	if len(envelope.Entries[len(envelope.Entries)-1].Data) == 0 {
+	if len(envelope.Entries[len(envelope.Entries)-1].Content.Data) == 0 {
 		t.Fatal("latest entry lost Data during old-entry degradation")
 	}
 
@@ -463,10 +463,10 @@ func TestEncodeGovernedToolHistoryRetainsCriticalEntries(t *testing.T) {
 	if failure.ToolName != "old-0" ||
 		failure.Status != string(tooling.ResultTimeout) ||
 		failure.ErrorCode != "timeout" ||
-		len(failure.Data) == 0 ||
-		len(failure.Source) != 1 ||
+		len(failure.Content.Data) == 0 ||
+		len(failure.Content.Source) != 1 ||
 		latest.ToolName != "latest" ||
-		len(latest.Data) == 0 {
+		len(latest.Content.Data) == 0 {
 		t.Fatalf("critical entries = %+v", envelope.Entries)
 	}
 	if !reflect.DeepEqual(history, original) {
@@ -515,7 +515,7 @@ func TestRenderGovernedToolLoopPrompt(t *testing.T) {
 		MaxToolResultTokens: 8,
 		KeepLatestResults:   1,
 	}}
-	const template = "query={{.Query}} analysis={{.Analysis.Summary}} history={{.ToolHistory}}"
+	const template = "query={{.Query}} analysis={{.Analysis}} history={{.ToolHistory}}"
 	rendered, report, err := runtime.renderGovernedToolLoopPrompt(template, state)
 	if err != nil {
 		t.Fatalf("renderGovernedToolLoopPrompt() error = %v", err)
@@ -528,15 +528,24 @@ func TestRenderGovernedToolLoopPrompt(t *testing.T) {
 	}
 	baselineHistory, err := marshalToolHistoryEnvelope(
 		baselineEntries,
+		"security.v1:release-v1",
 		"context.v1:release-v1:h100000:r8:k1",
 		0,
 	)
 	if err != nil {
 		t.Fatalf("marshalToolHistoryEnvelope() error = %v", err)
 	}
+	queryEnvelope, err := marshalUserInputEnvelope(state.snapshot.ReleaseVersion, state.input.Query)
+	if err != nil {
+		t.Fatalf("marshalUserInputEnvelope() error = %v", err)
+	}
+	analysisEnvelope, err := marshalModelOutputEnvelope(state.snapshot.ReleaseVersion, state.analysis)
+	if err != nil {
+		t.Fatalf("marshalModelOutputEnvelope() error = %v", err)
+	}
 	baselinePrompt, err := renderPrompt(template, map[string]any{
-		"Query":       state.input.Query,
-		"Analysis":    state.analysis,
+		"Query":       queryEnvelope,
+		"Analysis":    analysisEnvelope,
 		"ToolHistory": baselineHistory,
 	})
 	if err != nil {
@@ -544,14 +553,14 @@ func TestRenderGovernedToolLoopPrompt(t *testing.T) {
 	}
 	if report.contextVersion != "context.v1:release-v1:h100000:r8:k1" ||
 		!report.trimmed ||
-		report.tokensBefore != estimateTokenCount(baselinePrompt) ||
-		report.tokensAfter != estimateTokenCount(rendered) ||
+		report.tokensBefore != estimateTokenCount(systemSecurityInstruction)+estimateTokenCount(baselinePrompt) ||
+		report.tokensAfter != estimateTokenCount(systemSecurityInstruction)+estimateTokenCount(rendered) ||
 		report.tokensBefore <= report.tokensAfter {
 		t.Fatalf("prompt governance report = %+v", report)
 	}
 	for _, expected := range []string{
-		"原始用户目标 <保留>",
-		"原始任务分析 <保留>",
+		"原始用户目标 \\u003c保留\\u003e",
+		"原始任务分析 \\u003c保留\\u003e",
 		`"context_version":"context.v1:release-v1:h100000:r8:k1"`,
 		`"compressed":true`,
 	} {
@@ -577,7 +586,7 @@ func TestRenderGovernedToolLoopPrompt(t *testing.T) {
 // TestToolLoopPromptBuildsAlwaysStartFromOriginalHistory 验证决策和最终回答不会累积压缩结果。
 func TestToolLoopPromptBuildsAlwaysStartFromOriginalHistory(t *testing.T) {
 	snapshot := toolLoopSnapshot("v1")
-	const template = "{{.Query}}|{{.Analysis.Summary}}|{{.ToolHistory}}"
+	const template = "{{.Query}}|{{.Analysis}}|{{.ToolHistory}}"
 	snapshot.Prompts[toolDecisionPromptName] = configregistry.PromptVersion{
 		Name:     toolDecisionPromptName,
 		Version:  "prompt.decision.v1",
@@ -641,11 +650,11 @@ func TestToolLoopRunSendsGovernedPromptsWithoutExtraModelCalls(t *testing.T) {
 	if len(model.requests) != 3 {
 		t.Fatalf("model requests = %d, want 3", len(model.requests))
 	}
-	if strings.Contains(model.requests[0].Messages[0].Content, "context_version") {
+	if strings.Contains(model.requests[0].Messages[1].Content, "context_version") {
 		t.Fatal("task analysis Prompt unexpectedly includes governed tool history")
 	}
 	for _, index := range []int{1, 2} {
-		content := model.requests[index].Messages[0].Content
+		content := model.requests[index].Messages[1].Content
 		if !strings.Contains(content, `"context_version":"context.v1:v1:h12000:r2560:k10"`) ||
 			!strings.Contains(content, `"entries":[]`) {
 			t.Fatalf("model request %d does not use governed envelope: %s", index, content)
@@ -853,7 +862,7 @@ func TestToolLoopFailedRunRetainsContextObservation(t *testing.T) {
 func TestToolLoopShortHistoryPromptsHaveStableTokenMetrics(t *testing.T) {
 	snapshot := toolLoopSnapshot("v1")
 	finalPrompt := snapshot.Prompts[finalPromptName]
-	finalPrompt.Template = "final {{.Query}} {{.Analysis.Summary}} {{.ToolHistory}}"
+	finalPrompt.Template = "final {{.Query}} {{.Analysis}} {{.ToolHistory}}"
 	snapshot.Prompts[finalPromptName] = finalPrompt
 	history := []toolHistoryEntry{{
 		Record: ToolCallRecord{
@@ -939,12 +948,12 @@ func TestToolLoopMultipleCallsGovernPromptWithoutChangingRunFacts(t *testing.T) 
 	if len(model.requests) != 5 || len(observer.items) != 1 {
 		t.Fatalf("model requests = %d, observer items = %d", len(model.requests), len(observer.items))
 	}
-	if !strings.Contains(model.requests[2].Messages[0].Content, `"omitted_entries":0`) {
-		t.Fatalf("first tool result was unexpectedly omitted: %s", model.requests[2].Messages[0].Content)
+	if !strings.Contains(model.requests[2].Messages[1].Content, `"omitted_entries":0`) {
+		t.Fatalf("first tool result was unexpectedly omitted: %s", model.requests[2].Messages[1].Content)
 	}
 	for _, index := range []int{3, 4} {
-		if !strings.Contains(model.requests[index].Messages[0].Content, `"omitted_entries":1`) {
-			t.Fatalf("request %d does not report omitted old history: %s", index, model.requests[index].Messages[0].Content)
+		if !strings.Contains(model.requests[index].Messages[1].Content, `"omitted_entries":1`) {
+			t.Fatalf("request %d does not report omitted old history: %s", index, model.requests[index].Messages[1].Content)
 		}
 	}
 	observed := observer.items[0]
@@ -1133,7 +1142,7 @@ func newContextGovernanceToolRuntime(
 	configStore := configregistry.NewRegistry()
 	snapshot := toolLoopSnapshot("v1")
 	finalPrompt := snapshot.Prompts[finalPromptName]
-	finalPrompt.Template = "final {{.Query}} {{.Analysis.Summary}} {{.ToolHistory}}"
+	finalPrompt.Template = "final {{.Query}} {{.Analysis}} {{.ToolHistory}}"
 	snapshot.Prompts[finalPromptName] = finalPrompt
 	if err := configStore.Publish(snapshot); err != nil {
 		t.Fatalf("Publish() error = %v", err)
@@ -1182,7 +1191,7 @@ func newContextPolicyTestConfig(t *testing.T) ToolLoopConfig {
 	registry := configregistry.NewRegistry()
 	snapshot := toolLoopSnapshot("v1")
 	finalPrompt := snapshot.Prompts[finalPromptName]
-	finalPrompt.Template = "final {{.Query}} {{.Analysis.Summary}} {{.ToolHistory}}"
+	finalPrompt.Template = "final {{.Query}} {{.Analysis}} {{.ToolHistory}}"
 	snapshot.Prompts[finalPromptName] = finalPrompt
 	if err := registry.Publish(snapshot); err != nil {
 		t.Fatalf("Publish() error = %v", err)

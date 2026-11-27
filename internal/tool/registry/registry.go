@@ -43,6 +43,8 @@ func (r *ToolRegistry) Register(tool tooling.Tool) error {
 		return ErrInvalidRegistryTool
 	}
 	normalizedDefinition := normalizeToolIdentity(definition)
+	// 旧工具可以省略结果类别；注册快照统一保存归一值，避免不同查询入口看到不同零值语义。
+	normalizedDefinition.ResultContentKind = normalizedDefinition.ResultContentKind.Normalized()
 	registeredTool := tool
 	if normalizedDefinition.Name != definition.Name ||
 		normalizedDefinition.Version != definition.Version {

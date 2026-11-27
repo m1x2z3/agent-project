@@ -51,6 +51,40 @@ func TestToolDefinitionValidate(t *testing.T) {
 	}
 }
 
+func TestToolDefinitionResultContentKind(t *testing.T) {
+	validKinds := []ResultContentKind{
+		"",
+		ResultContentToolResult,
+		ResultContentDocument,
+		ResultContentLog,
+		ResultContentIssue,
+	}
+	for _, kind := range validKinds {
+		definition := testDefinition()
+		definition.ResultContentKind = kind
+		if err := definition.Validate(); err != nil {
+			t.Fatalf("result content kind %q rejected: %v", kind, err)
+		}
+	}
+
+	if got := ResultContentKind("").Normalized(); got != ResultContentToolResult {
+		t.Fatalf("zero result content kind = %q, want %q", got, ResultContentToolResult)
+	}
+	for _, kind := range []ResultContentKind{
+		"system_instruction",
+		"user_input",
+		"model_output",
+		"document ",
+		"unknown",
+	} {
+		definition := testDefinition()
+		definition.ResultContentKind = kind
+		if !errors.Is(definition.Validate(), ErrInvalidDefinition) {
+			t.Fatalf("invalid result content kind %q accepted: %v", kind, definition.Validate())
+		}
+	}
+}
+
 func TestToolExecutionRequestAndResultValidation(t *testing.T) {
 	request := testRequest()
 	if err := request.Validate(); err != nil {

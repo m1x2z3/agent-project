@@ -19,8 +19,8 @@ import (
 
 func TestRuntimeRunsVersionedChainAndObservesMetadata(t *testing.T) {
 	registry := configregistry.NewRegistry()
-	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}} / {{.Analysis.Summary}}")
-	publishRuntimeSnapshot(t, registry, "v2", "候选分析：{{.Query}}", "候选回答：{{.Query}} / {{.Analysis.Summary}}")
+	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}} / {{.Analysis}}")
+	publishRuntimeSnapshot(t, registry, "v2", "候选分析：{{.Query}}", "候选回答：{{.Query}} / {{.Analysis}}")
 	if err := registry.Activate("v1"); err != nil {
 		t.Fatalf("Activate() error = %v", err)
 	}
@@ -57,8 +57,8 @@ func TestRuntimeRunsVersionedChainAndObservesMetadata(t *testing.T) {
 		t.Fatalf("missing output metadata: %+v", output)
 	}
 	if len(model.requests) != 2 ||
-		!strings.Contains(model.requests[0].Messages[0].Content, "订单服务错误") ||
-		!strings.Contains(model.requests[1].Messages[0].Content, "定位订单服务错误") {
+		!strings.Contains(model.requests[0].Messages[1].Content, "订单服务错误") ||
+		!strings.Contains(model.requests[1].Messages[1].Content, "定位订单服务错误") {
 		t.Fatalf("unexpected model requests: %+v", model.requests)
 	}
 	if model.requests[0].Model != "fake-task_analysis" ||
@@ -481,7 +481,7 @@ func TestRuntimeBindsOldRunToOldPromptAfterActivationChanges(t *testing.T) {
 	if _, err := registry.GetRunSnapshot("run-old"); err != nil {
 		t.Fatalf("GetRunSnapshot() error = %v", err)
 	}
-	if len(model.requests) < 2 || !strings.HasPrefix(model.requests[0].Messages[0].Content, "old ") {
+	if len(model.requests) < 2 || !strings.HasPrefix(model.requests[0].Messages[1].Content, "old ") {
 		t.Fatalf("first analysis prompt = %+v", model.requests)
 	}
 	if _, err := runtime.Run(context.Background(), RunInput{
@@ -489,7 +489,7 @@ func TestRuntimeBindsOldRunToOldPromptAfterActivationChanges(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run(new) error = %v", err)
 	}
-	if len(model.requests) < 3 || !strings.HasPrefix(model.requests[2].Messages[0].Content, "new ") {
+	if len(model.requests) < 3 || !strings.HasPrefix(model.requests[2].Messages[1].Content, "new ") {
 		t.Fatalf("new analysis prompt = %+v", model.requests)
 	}
 }
@@ -731,7 +731,7 @@ func newRuntimeWithRunStore(
 ) *Runtime {
 	t.Helper()
 	registry := configregistry.NewRegistry()
-	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}} / {{.Analysis.Summary}}")
+	publishRuntimeSnapshot(t, registry, "v1", "分析：{{.Query}}", "回答：{{.Query}} / {{.Analysis}}")
 	if err := registry.Activate("v1"); err != nil {
 		t.Fatalf("Activate() error = %v", err)
 	}

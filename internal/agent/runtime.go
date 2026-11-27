@@ -188,6 +188,10 @@ func (r *Runtime) bindRunSnapshot(ctx context.Context, state runtimeState) (runt
 		return runtimeState{}, runtimeFailure("bind_run", err)
 	}
 	state.snapshot = snapshot.Snapshot
+	state.execution.mu.Lock()
+	state.execution.securityVersion = securityVersion(snapshot.ReleaseVersion)
+	state.execution.observation.SecurityVersion = state.execution.securityVersion
+	state.execution.mu.Unlock()
 	if !state.execution.shadow {
 		// 普通 Run 在快照绑定成功后才创建持久化记录，确保 RunStore 保存的
 		// 配置版本与后续模型调用使用的是同一份不可变快照。
@@ -205,13 +209,24 @@ func (r *Runtime) renderAnalysisPrompt(ctx context.Context, state runtimeState) 
 	if err := ctx.Err(); err != nil {
 		return runtimeState{}, err
 	}
+	// 每个完成快照绑定的 Run 只检查一次 Query；命中也计检查和一次安全拦截。
+	report := inspectPromptInjection(state.input.Query)
+	recordSecurityCheck(state.execution)
+	if report.blocked() {
+		recordSecurityBlock(state.execution, ErrPromptInjectionDetected)
+		return runtimeState{}, runtimeFailure("analysis_security", ErrPromptInjectionDetected)
+	}
 	// 分类 Prompt 必须从 Run 快照读取，不能在 Runtime 中硬编码，
 	// 这样 Prompt 版本才能与本次 Run 的发布版本保持一致。
 	promptVersion, err := promptFromSnapshot(state.snapshot, analysisPromptName)
 	if err != nil {
 		return runtimeState{}, err
 	}
-	rendered, err := renderPrompt(promptVersion.Template, map[string]any{"Query": state.input.Query})
+	queryEnvelope, err := marshalUserInputEnvelope(state.snapshot.ReleaseVersion, state.input.Query)
+	if err != nil {
+		return runtimeState{}, fmt.Errorf("%w: encode user input", ErrPromptRenderFailed)
+	}
+	rendered, err := renderPrompt(promptVersion.Template, map[string]any{"Query": queryEnvelope})
 	if err != nil {
 		return runtimeState{}, err
 	}
@@ -234,6 +249,7 @@ func (r *Runtime) callAnalysisModel(ctx context.Context, state runtimeState) (ru
 		modelError:       ErrAnalysisModelFailed,
 	})
 	state.analysisResponse = response
+	state.analysisContentTrust = trustUntrustedModel
 	if err != nil {
 		return runtimeState{}, err
 	}
@@ -276,9 +292,17 @@ func (r *Runtime) renderFinalPrompt(ctx context.Context, state runtimeState) (ru
 	if err != nil {
 		return runtimeState{}, err
 	}
+	queryEnvelope, err := marshalUserInputEnvelope(state.snapshot.ReleaseVersion, state.input.Query)
+	if err != nil {
+		return runtimeState{}, fmt.Errorf("%w: encode user input", ErrPromptRenderFailed)
+	}
+	analysisEnvelope, err := marshalModelOutputEnvelope(state.snapshot.ReleaseVersion, state.analysis)
+	if err != nil {
+		return runtimeState{}, fmt.Errorf("%w: encode model analysis", ErrPromptRenderFailed)
+	}
 	rendered, err := renderPrompt(promptVersion.Template, map[string]any{
-		"Query":    state.input.Query,
-		"Analysis": state.analysis,
+		"Query":    queryEnvelope,
+		"Analysis": analysisEnvelope,
 	})
 	if err != nil {
 		return runtimeState{}, err
@@ -302,6 +326,7 @@ func (r *Runtime) callFinalModel(ctx context.Context, state runtimeState) (runti
 		modelError:       ErrFinalModelFailed,
 	})
 	state.finalResponse = response
+	state.finalContentTrust = trustUntrustedModel
 	if err != nil {
 		return runtimeState{}, err
 	}

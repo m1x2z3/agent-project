@@ -45,6 +45,39 @@ func (e *Executor) resolveTool(ctx context.Context, request ToolCallRequest) (re
 	return e.registry.Resolve(request.Decision.ToolName, request.ToolVersion)
 }
 
+// Inspect 按真实执行顺序完成全部只读契约检查，但不调用 Tool.Execute。
+//
+// 返回的是注册中心中已解析工具定义的独立副本，供上层在执行前判断危险能力和
+// 数据流。Context、请求、工具发现、参数编码、Schema、权限、资源范围和审批错误
+// 都保留原稳定原因；该入口不占用 Agent 工具预算，也不产生工具执行事件。
+func (e *Executor) Inspect(
+	ctx context.Context,
+	request ToolCallRequest,
+) (tooling.ToolDefinition, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return tooling.ToolDefinition{}, err
+		}
+	}
+	resolvedTool, err := e.resolveTool(ctx, request)
+	if err != nil {
+		return tooling.ToolDefinition{}, err
+	}
+	executionRequest, err := buildExecutionRequest(request)
+	if err != nil {
+		return tooling.ToolDefinition{}, err
+	}
+	if err := tooling.ValidateExecutionRequest(
+		resolvedTool.Definition,
+		executionRequest,
+		recording.ClockFromContext(ctx).Now(),
+	); err != nil {
+		return tooling.ToolDefinition{}, err
+	}
+	// Registry.Resolve 已深拷贝可变字段；再返回定义值，调用方不能修改注册快照。
+	return resolvedTool.Definition, nil
+}
+
 // Execute 执行一次单轮工具调用。
 //
 // Executor 只负责编排各层边界：先解析工具，再把请求转换为工具层结构，
@@ -67,5 +100,12 @@ func (e *Executor) Execute(
 	if err != nil {
 		return tooling.ToolResult{}, err
 	}
-	return tooling.Invoke(ctx, resolvedTool.Tool, executionRequest)
+	result, err := tooling.Invoke(ctx, resolvedTool.Tool, executionRequest)
+	if err != nil {
+		return result, err
+	}
+	// 结果类别只能来自本次解析到的注册定义。覆盖工具实现返回的同名字段，
+	// 防止不可信工具结果把自身伪装成系统指令、用户输入或模型输出。
+	result.ResultContentKind = resolvedTool.Definition.ResultContentKind.Normalized()
+	return result, nil
 }

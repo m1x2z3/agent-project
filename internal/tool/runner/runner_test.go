@@ -658,6 +658,140 @@ func TestExecutorDoesNotExecuteDeprecatedToolVersion(t *testing.T) {
 	}
 }
 
+func TestExecutorInspectChecksContractWithoutExecutingTool(t *testing.T) {
+	tool := &runnerTestTool{definition: runnerTestDefinition()}
+	toolRegistry := registry.NewToolRegistry()
+	if err := toolRegistry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	executor, err := NewExecutor(toolRegistry)
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	request := validToolCallRequest(time.Now().Add(time.Hour))
+	request.CapabilityToken.Permissions = []tooling.Permission{"docs:read"}
+
+	definition, err := executor.Inspect(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if definition.Name != request.Decision.ToolName || definition.Version != request.ToolVersion ||
+		tool.executeCalls != 0 {
+		t.Fatalf("Inspect() definition = %+v, tool calls = %d", definition, tool.executeCalls)
+	}
+	// 返回值不能共享注册定义中的可变切片，否则上层检查可能污染后续 Run。
+	definition.CapabilityTags[0] = "changed"
+	registered, err := toolRegistry.Resolve(request.Decision.ToolName, request.ToolVersion)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if registered.Definition.CapabilityTags[0] != "docs" {
+		t.Fatalf("Inspect() returned an aliased definition: %+v", registered.Definition)
+	}
+}
+
+func TestExecutorInspectPreservesContractErrorsWithoutExecution(t *testing.T) {
+	tests := []struct {
+		name           string
+		editRequest    func(*ToolCallRequest)
+		editDefinition func(*tooling.ToolDefinition)
+		cancelContext  bool
+		want           error
+	}{
+		{
+			name: "context cancellation precedes request validation",
+			editRequest: func(r *ToolCallRequest) {
+				r.Decision.ShouldCall = false
+			},
+			cancelContext: true,
+			want:          context.Canceled,
+		},
+		{
+			name: "request validation precedes registry resolution",
+			editRequest: func(r *ToolCallRequest) {
+				r.Decision.ToolName = "unknown_tool"
+				r.CapabilityToken.ToolName = "unknown_tool"
+				r.ToolVersion = ""
+			},
+			want: ErrToolVersionRequired,
+		},
+		{
+			name: "unknown tool",
+			editRequest: func(r *ToolCallRequest) {
+				r.Decision.ToolName = "unknown_tool"
+				r.CapabilityToken.ToolName = "unknown_tool"
+			},
+			want: registry.ErrToolNotFound,
+		},
+		{
+			name: "arguments encoding",
+			editRequest: func(r *ToolCallRequest) {
+				r.Decision.Arguments = map[string]any{"unsupported": func() {}}
+			},
+			want: ErrArgumentsEncodingFailed,
+		},
+		{
+			name: "argument schema",
+			editRequest: func(r *ToolCallRequest) {
+				r.Decision.Arguments = map[string]any{"unexpected": true}
+			},
+			want: tooling.ErrArgumentsInvalid,
+		},
+		{
+			name: "permission",
+			editRequest: func(r *ToolCallRequest) {
+				r.CapabilityToken.Permissions = nil
+			},
+			want: tooling.ErrPermissionDenied,
+		},
+		{
+			name: "high risk approval",
+			editDefinition: func(d *tooling.ToolDefinition) {
+				d.RiskLevel = tooling.RiskHigh
+				d.EffectClass = tooling.EffectNonRetryableWrite
+			},
+			want: tooling.ErrApprovalRequired,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			definition := runnerTestDefinition()
+			if test.editDefinition != nil {
+				test.editDefinition(&definition)
+			}
+			tool := &runnerTestTool{definition: definition}
+			toolRegistry := registry.NewToolRegistry()
+			if err := toolRegistry.Register(tool); err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+			executor, err := NewExecutor(toolRegistry)
+			if err != nil {
+				t.Fatalf("NewExecutor() error = %v", err)
+			}
+			request := validToolCallRequest(time.Now().Add(time.Hour))
+			request.CapabilityToken.Permissions = []tooling.Permission{"docs:read"}
+			if test.editRequest != nil {
+				test.editRequest(&request)
+			}
+			var ctx context.Context = context.Background()
+			if test.cancelContext {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			definition, err = executor.Inspect(ctx, request)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("Inspect() error = %v, want %v", err, test.want)
+			}
+			if definition.Name != "" || definition.ParameterSchema != nil || tool.executeCalls != 0 {
+				t.Fatalf("failed Inspect() definition = %+v, tool calls = %d", definition, tool.executeCalls)
+			}
+		})
+	}
+}
+
 type runnerTestTool struct {
 	definition   tooling.ToolDefinition
 	executeCalls int

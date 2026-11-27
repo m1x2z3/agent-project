@@ -63,16 +63,17 @@ func NewSearchProjectDocsTool(store ProjectDocStore, observer Observer) *SearchP
 // Definition 返回项目文档搜索工具的稳定契约。
 func (t *SearchProjectDocsTool) Definition() tooling.ToolDefinition {
 	return tooling.ToolDefinition{
-		Name:            SearchProjectDocsName,
-		Version:         ReadToolVersion,
-		Description:     "在当前租户的指定项目中搜索研发文档",
-		Permission:      tooling.Permission("project_docs:read"),
-		RiskLevel:       tooling.RiskLow,
-		EffectClass:     tooling.EffectRead,
-		Timeout:         2 * time.Second,
-		ParameterSchema: SearchProjectDocsParameterSchema(),
-		TenantScope:     tooling.TenantScopeCurrentTenant,
-		CapabilityTags:  []string{"read_only", "project_docs", "search"},
+		Name:              SearchProjectDocsName,
+		Version:           ReadToolVersion,
+		Description:       "在当前租户的指定项目中搜索研发文档",
+		Permission:        tooling.Permission("project_docs:read"),
+		RiskLevel:         tooling.RiskLow,
+		EffectClass:       tooling.EffectRead,
+		ResultContentKind: tooling.ResultContentDocument,
+		Timeout:           2 * time.Second,
+		ParameterSchema:   SearchProjectDocsParameterSchema(),
+		TenantScope:       tooling.TenantScopeCurrentTenant,
+		CapabilityTags:    []string{"read_only", "project_docs", "search"},
 	}
 }
 

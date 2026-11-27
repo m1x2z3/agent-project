@@ -133,6 +133,44 @@ func TestRegistryRegisterValidTool(t *testing.T) {
 	}
 }
 
+func TestRegistryNormalizesResultContentKind(t *testing.T) {
+	registry := NewToolRegistry()
+	definition := testRegistryDefinition("example", "v1")
+	if err := registry.Register(&testRegistryTool{definition: definition}); err != nil {
+		t.Fatalf("Register() zero result kind error = %v", err)
+	}
+	registered, err := registry.Resolve("example", "v1")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if registered.Definition.ResultContentKind != tooling.ResultContentToolResult {
+		t.Fatalf("registered zero result kind = %q, want %q",
+			registered.Definition.ResultContentKind, tooling.ResultContentToolResult)
+	}
+	if definition.ResultContentKind != "" {
+		t.Fatalf("Register() mutated caller definition kind = %q", definition.ResultContentKind)
+	}
+
+	documentDefinition := testRegistryDefinition("documents", "v1")
+	documentDefinition.ResultContentKind = tooling.ResultContentDocument
+	if err := registry.Register(&testRegistryTool{definition: documentDefinition}); err != nil {
+		t.Fatalf("Register() document result kind error = %v", err)
+	}
+	documentTool, err := registry.Resolve("documents", "v1")
+	if err != nil {
+		t.Fatalf("Resolve() document error = %v", err)
+	}
+	if documentTool.Definition.ResultContentKind != tooling.ResultContentDocument {
+		t.Fatalf("registered document kind = %q", documentTool.Definition.ResultContentKind)
+	}
+
+	invalidDefinition := testRegistryDefinition("invalid", "v1")
+	invalidDefinition.ResultContentKind = "system_instruction"
+	if err := registry.Register(&testRegistryTool{definition: invalidDefinition}); err != ErrInvalidRegistryTool {
+		t.Fatalf("Register() invalid result kind error = %v, want ErrInvalidRegistryTool", err)
+	}
+}
+
 func TestRegistryRegisterRejectsInvalidTools(t *testing.T) {
 	tests := []struct {
 		name string

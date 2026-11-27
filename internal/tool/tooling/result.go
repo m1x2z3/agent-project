@@ -38,6 +38,10 @@ type ToolResult struct {
 	Data        json.RawMessage
 	Source      []SourceRef
 	Error       *ToolError
+	// ResultContentKind 是执行编排层从注册定义复制的可信来源元数据。
+	// Tool.Execute 可以返回该字段，但 runner.Executor 会用注册快照覆盖它；
+	// Agent 不接受 Data、Source 或正文中的类别声明。
+	ResultContentKind ResultContentKind
 }
 
 // Validate 检查结果状态和错误字段是否一致。

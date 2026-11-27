@@ -105,6 +105,39 @@ func recordRoute(execution *runtimeExecution, route configregistry.ModelRouteVer
 	execution.observation.Model = route.Model
 }
 
+// recordSecurityCheck 按业务检查单位累计一次安全检测。
+// 调用方负责保证一次 Query、一个成功返回的工具结果或一个工具请求只调用一次；
+// 该函数不接收原文、命中类别或命中片段，执行锁保证累计更新不会丢失。
+func recordSecurityCheck(execution *runtimeExecution) {
+	if execution == nil {
+		return
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	execution.observation.SecurityChecks++
+}
+
+// recordSecurityBlock 在实际安全终止时累计一次总拦截及一个子类别。
+// 非安全错误不会增加计数；危险能力和数据流同时存在于错误链时，危险能力优先。
+func recordSecurityBlock(execution *runtimeExecution, err error) {
+	if execution == nil {
+		return
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	switch {
+	case errors.Is(err, ErrPromptInjectionDetected):
+		execution.observation.SecurityBlocks++
+		execution.observation.PromptInjectionBlocks++
+	case errors.Is(err, ErrDangerousToolRequest):
+		execution.observation.SecurityBlocks++
+		execution.observation.DangerousToolBlocks++
+	case errors.Is(err, ErrDataExfiltrationBlocked):
+		execution.observation.SecurityBlocks++
+		execution.observation.DataFlowBlocks++
+	}
+}
+
 // recordContextGovernance 将一次 Prompt 治理报告累计到当前 Run 的脱敏观测。
 //
 // 每次调用代表一次工具决策或最终回答 Prompt 构建；只有报告明确标记发生
@@ -170,6 +203,12 @@ func classifyRuntimeError(err error) string {
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
+	case errors.Is(err, ErrPromptInjectionDetected):
+		return "security_prompt_injection"
+	case errors.Is(err, ErrDangerousToolRequest):
+		return "security_dangerous_tool"
+	case errors.Is(err, ErrDataExfiltrationBlocked):
+		return "security_data_exfiltration"
 	case errors.Is(err, ErrAnalysisModelFailed):
 		return "analysis_model_error"
 	case errors.Is(err, ErrFinalModelFailed):

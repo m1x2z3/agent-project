@@ -64,26 +64,32 @@ type Observer interface {
 
 // RunObservation 是一次 Runtime 执行的脱敏观测结果。
 type RunObservation struct {
-	RequestID           string
-	TenantID            string
-	RunID               string
-	ReleaseVersion      string
-	Provider            string
-	Model               string
-	Duration            time.Duration
-	Success             bool
-	StructuredValid     bool
-	PromptTokens        int
-	CompletionTokens    int
-	TotalTokens         int
-	Cost                float64
-	Shadow              bool
-	ErrorKind           string
-	ContextVersion      string // 保存本次 Run 固定的上下文算法、发布版本和治理参数标识。
-	ContextBuilds       int    // 累计已治理的工具决策和最终回答 Prompt 数量。
-	ContextTrimmed      int    // 累计实际发生压缩、降级或省略的 Prompt 数量。
-	ContextTokensBefore int    // 累计未治理基线 Prompt 的本地 Token 估算。
-	ContextTokensAfter  int    // 累计实际发送给模型的治理后 Prompt 本地 Token 估算。
+	RequestID             string
+	TenantID              string
+	RunID                 string
+	ReleaseVersion        string
+	Provider              string
+	Model                 string
+	Duration              time.Duration
+	Success               bool
+	StructuredValid       bool
+	PromptTokens          int
+	CompletionTokens      int
+	TotalTokens           int
+	Cost                  float64
+	Shadow                bool
+	ErrorKind             string
+	SecurityVersion       string // 保存本次 Run 固定的安全算法及发布版本。
+	SecurityChecks        int    // 累计已完成的 Query、工具结果和执行前安全检查。
+	SecurityBlocks        int    // 累计因安全策略终止当前 Run 的次数。
+	PromptInjectionBlocks int    // 累计 Prompt Injection 拦截次数。
+	DangerousToolBlocks   int    // 累计危险能力或未审批高风险操作拦截次数。
+	DataFlowBlocks        int    // 累计不可信外部内容流向非只读工具的拦截次数。
+	ContextVersion        string // 保存本次 Run 固定的上下文算法、发布版本和治理参数标识。
+	ContextBuilds         int    // 累计已治理的工具决策和最终回答 Prompt 数量。
+	ContextTrimmed        int    // 累计实际发生压缩、降级或省略的 Prompt 数量。
+	ContextTokensBefore   int    // 累计未治理基线 Prompt 的本地 Token 估算。
+	ContextTokensAfter    int    // 累计实际发送给模型的治理后 Prompt 本地 Token 估算。
 }
 
 // RuntimeConfig 是 Agent Runtime 的构造参数。
@@ -116,29 +122,32 @@ type Runtime struct {
 type runtimeState struct {
 	// runtimeState 是 Eino Chain 各阶段之间传递的中间状态。
 	// 每个阶段只负责补充自己产生的数据，后续阶段从这里读取前置结果。
-	input             RunInput
-	execution         *runtimeExecution
-	snapshot          configregistry.ConfigSnapshot
-	analysisPrompt    string
-	finalPrompt       string
-	analysisResponse  modelgateway.ChatResponse
-	finalResponse     modelgateway.ChatResponse
-	analysis          structuredoutput.TaskAnalysis
-	finalAnswer       structuredoutput.FinalAnswer
-	analysisReport    structuredoutput.DecodeReport
-	finalAnswerReport structuredoutput.DecodeReport
+	input                RunInput
+	execution            *runtimeExecution
+	snapshot             configregistry.ConfigSnapshot
+	analysisPrompt       string
+	finalPrompt          string
+	analysisResponse     modelgateway.ChatResponse
+	finalResponse        modelgateway.ChatResponse
+	analysisContentTrust trustLevel // 原始分析及解析后的 TaskAnalysis 都固定为不可信模型内容。
+	finalContentTrust    trustLevel // 原始最终响应及解析后的 FinalAnswer 都固定为不可信模型内容。
+	analysis             structuredoutput.TaskAnalysis
+	finalAnswer          structuredoutput.FinalAnswer
+	analysisReport       structuredoutput.DecodeReport
+	finalAnswerReport    structuredoutput.DecodeReport
 }
 
 type runtimeExecution struct {
 	// runtimeExecution 保存一次 Run 的生命周期数据。
 	// Chain 的中间状态用于业务编排，本结构用于跨阶段共享观测信息。
-	mu          sync.Mutex
-	started     time.Time
-	budget      *BudgetController // 保存当前 Run 独立的预算上限和消耗，不与其他执行共享。
-	shadow      bool
-	recorder    *runStoreRecorder
-	observation RunObservation
-	observed    bool
+	mu              sync.Mutex
+	started         time.Time
+	budget          *BudgetController // 保存当前 Run 独立的预算上限和消耗，不与其他执行共享。
+	shadow          bool
+	securityVersion string // 快照绑定后固定本次 Run 的安全算法及发布版本。
+	recorder        *runStoreRecorder
+	observation     RunObservation
+	observed        bool
 }
 
 type executionContextKey struct{}

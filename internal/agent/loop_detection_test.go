@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"agent-project/internal/structuredoutput"
+	"agent-project/internal/tool/registry"
 	"agent-project/internal/tool/runner"
 	"agent-project/internal/tool/tooling"
 )
@@ -88,9 +89,29 @@ func newToolLoopForLoopDetection(
 			Data:   []byte(`{"hits":[]}`),
 		},
 	}
+	// 安全预检先于循环检测，因此变更版本的用例也必须让 v2 通过真实注册契约；
+	// 否则预检会正确地先返回工具版本不存在，而不是进入本次要验证的循环判断。
+	versionTwoDefinition := toolLoopExecutionDefinition()
+	versionTwoDefinition.Version = "v2"
+	versionTwoTool := &toolLoopTestTool{definition: versionTwoDefinition}
+	toolRegistry := registry.NewToolRegistry()
+	if err := toolRegistry.Register(tool); err != nil {
+		t.Fatalf("Register(v1) error = %v", err)
+	}
+	if err := toolRegistry.Register(versionTwoTool); err != nil {
+		t.Fatalf("Register(v2) error = %v", err)
+	}
+	executor, err := runner.NewExecutor(toolRegistry)
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
 	observer := &recordingObserver{}
 	authorizerCalls := 0
-	runtime := newToolLoopFailureRuntime(t, model, tool, observer, func(
+	cfg := newContextPolicyTestConfig(t)
+	cfg.Model = model
+	cfg.Executor = executor
+	cfg.Observer = observer
+	cfg.Authorizer = func(
 		_ context.Context,
 		input RunInput,
 		decision structuredoutput.ToolDecision,
@@ -104,7 +125,11 @@ func newToolLoopForLoopDetection(
 		request.ToolVersion = version
 		request.CapabilityToken.ToolVersion = version
 		return request, nil
-	})
+	}
+	runtime, err := NewToolLoopRuntime(cfg)
+	if err != nil {
+		t.Fatalf("NewToolLoopRuntime() error = %v", err)
+	}
 	return runtime, tool, observer
 }
 

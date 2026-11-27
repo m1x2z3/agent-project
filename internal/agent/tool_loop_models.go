@@ -19,14 +19,26 @@ func (r *ToolLoopRuntime) runAnalysis(
 	if err := ctx.Err(); err != nil {
 		return toolLoopState{}, err
 	}
+	// 快照绑定后才检查 Query，使命中时仍使用本次 Run 已固定的安全版本。
+	// 每个 Run 只累计一次 Query 检查，命中时同时累计一次注入拦截。
+	injectionReport := inspectPromptInjection(state.input.Query)
+	recordSecurityCheck(state.execution)
+	if injectionReport.blocked() {
+		recordSecurityBlock(state.execution, ErrPromptInjectionDetected)
+		return toolLoopState{}, runtimeFailure("tool_loop_analysis_security", ErrPromptInjectionDetected)
+	}
 	// 读取 Prompt、Schema 和路由必须使用已经绑定的快照，不能回到 Registry 查询 active 版本。
 	promptVersion, err := promptFromSnapshot(state.snapshot, analysisPromptName)
 	if err != nil {
 		return toolLoopState{}, err
 	}
-	// Prompt 只接收原始查询；分析结果必须在模型返回并通过校验后才会产生。
+	// Query 只通过带版本的可信标签 envelope 进入模板，不再以无标签原文拼接。
+	queryEnvelope, err := marshalUserInputEnvelope(state.snapshot.ReleaseVersion, state.input.Query)
+	if err != nil {
+		return toolLoopState{}, fmt.Errorf("%w: encode user input", ErrPromptRenderFailed)
+	}
 	rendered, err := renderPrompt(promptVersion.Template, map[string]any{
-		"Query": state.input.Query,
+		"Query": queryEnvelope,
 	})
 	if err != nil {
 		return toolLoopState{}, err
@@ -48,6 +60,7 @@ func (r *ToolLoopRuntime) runAnalysis(
 	// 原始响应仅留在当前阶段状态中，最终输出和观测不会暴露模型原文。
 	state.analysisPrompt = rendered
 	state.analysisResponse = response
+	state.analysisContentTrust = trustUntrustedModel
 	if err != nil {
 		return toolLoopState{}, err
 	}
@@ -90,7 +103,7 @@ func (r *ToolLoopRuntime) runAnalysis(
 
 // renderGovernedToolLoopPrompt 使用同一模板构建未治理基线和实际治理后 Prompt。
 //
-// before 和 after 都包含 Query、TaskAnalysis、模板文本及版本化历史 envelope，
+// before 和 after 都包含同一固定 system、Query、TaskAnalysis、模板文本及版本化历史 envelope，
 // 区别只在于历史是否经过压缩、降级和省略。调用方在渲染成功后提交报告，
 // 由当前 Run 的执行账本统一累计到 Observer/RunStore 最终观测。
 func (r *ToolLoopRuntime) renderGovernedToolLoopPrompt(
@@ -107,7 +120,12 @@ func (r *ToolLoopRuntime) renderGovernedToolLoopPrompt(
 	if err != nil {
 		return "", contextGovernanceReport{}, err
 	}
-	baselineHistory, err := marshalToolHistoryEnvelope(baselineEntries, contextVersion, 0)
+	baselineHistory, err := marshalToolHistoryEnvelope(
+		baselineEntries,
+		securityVersion(state.snapshot.ReleaseVersion),
+		contextVersion,
+		0,
+	)
 	if err != nil {
 		return "", contextGovernanceReport{}, err
 	}
@@ -120,10 +138,18 @@ func (r *ToolLoopRuntime) renderGovernedToolLoopPrompt(
 		return "", contextGovernanceReport{}, err
 	}
 
-	// 两次渲染共享原始 Query 和已校验分析结果，只替换历史投影。
+	// before 和 after 共享同一组 Query/Analysis envelope，只有历史治理投影不同。
+	queryEnvelope, err := marshalUserInputEnvelope(state.snapshot.ReleaseVersion, state.input.Query)
+	if err != nil {
+		return "", contextGovernanceReport{}, fmt.Errorf("%w: encode user input", ErrPromptRenderFailed)
+	}
+	analysisEnvelope, err := marshalModelOutputEnvelope(state.snapshot.ReleaseVersion, state.analysis)
+	if err != nil {
+		return "", contextGovernanceReport{}, fmt.Errorf("%w: encode model analysis", ErrPromptRenderFailed)
+	}
 	promptData := map[string]any{
-		"Query":       state.input.Query,
-		"Analysis":    state.analysis,
+		"Query":       queryEnvelope,
+		"Analysis":    analysisEnvelope,
 		"ToolHistory": baselineHistory,
 	}
 	baselinePrompt, err := renderPrompt(template, promptData)
@@ -135,8 +161,8 @@ func (r *ToolLoopRuntime) renderGovernedToolLoopPrompt(
 	if err != nil {
 		return "", contextGovernanceReport{}, err
 	}
-	report.tokensBefore = estimateTokenCount(baselinePrompt)
-	report.tokensAfter = estimateTokenCount(rendered)
+	report.tokensBefore = estimateModelRequestTokens(baselinePrompt)
+	report.tokensAfter = estimateModelRequestTokens(rendered)
 	return rendered, report, nil
 }
 
@@ -249,6 +275,7 @@ func (r *ToolLoopRuntime) callToolLoopFinalModel(
 		modelError:       ErrFinalModelFailed,
 	})
 	state.finalResponse = response
+	state.finalContentTrust = trustUntrustedModel
 	if err != nil {
 		return toolLoopState{}, err
 	}
@@ -330,6 +357,7 @@ func (r *ToolLoopRuntime) callToolDecisionModel(
 	})
 	// 原始响应只留在中间状态，下一阶段会执行严格结构化校验。
 	state.toolDecisionResponse = response
+	state.toolDecisionContentTrust = trustUntrustedModel
 	if err != nil {
 		return toolLoopState{}, err
 	}

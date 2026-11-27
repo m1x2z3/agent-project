@@ -53,6 +53,18 @@ func TestToolParameterSchemasAreValidReadOnlyContracts(t *testing.T) {
 	}
 }
 
+func TestReadToolResultContentKinds(t *testing.T) {
+	documentTool := NewSearchProjectDocsTool(&fakeProjectDocStore{}, nil)
+	if got := documentTool.Definition().ResultContentKind; got != tooling.ResultContentDocument {
+		t.Fatalf("document tool result kind = %q, want %q", got, tooling.ResultContentDocument)
+	}
+
+	clockTool := NewCurrentTimeTool(nil, nil)
+	if got := clockTool.Definition().ResultContentKind.Normalized(); got != tooling.ResultContentToolResult {
+		t.Fatalf("clock tool result kind = %q, want %q", got, tooling.ResultContentToolResult)
+	}
+}
+
 func TestToolParameterSchemaReturnsIndependentCopy(t *testing.T) {
 	first := GetCurrentTimeParameterSchema()
 	first[0] = 'x'

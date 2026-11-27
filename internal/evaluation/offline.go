@@ -158,7 +158,7 @@ func OfflineSnapshot(version, provider string) configregistry.ConfigSnapshot {
 			},
 			"final_answer": {
 				Name: "final_answer", Version: "prompt.final.v1",
-				Template: "基于分析 {{.Analysis.Summary}} 回答：{{.Query}}",
+				Template: "基于分析 {{.Analysis}} 回答：{{.Query}}",
 			},
 		},
 		Schemas: map[string]configregistry.SchemaVersion{
